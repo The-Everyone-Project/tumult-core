@@ -8,6 +8,7 @@ import re
 from threading import Lock
 from typing import Any, List, TypeVar
 
+import pandas as pd
 from pyspark.sql import DataFrame, SparkSession
 
 from tmlt.core.utils.configuration import Config
@@ -30,6 +31,11 @@ def print_sdf(sdf: DataFrame) -> None:
     df = sdf.toPandas()
     # TODO(#2107): Fix typing here
     print(df.sort_values(list(df.columns), ignore_index=True))  # type: ignore
+
+
+def print_pandas(df: pd.DataFrame) -> None:
+    """Prints a pandas dataframe in a deterministic way."""
+    print(df.sort_values(list(df.columns), ignore_index=True))
 
 
 T = TypeVar("T")

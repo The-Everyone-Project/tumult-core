@@ -40,7 +40,14 @@ Regenerating the golden vectors:
 
 import datetime
 import decimal
-from test.unit.utils.truncation_testing import EDGE_CASES, EdgeCase
+import random
+from collections import Counter
+from test.unit.utils.truncation_testing import (
+    COLUMN_KINDS,
+    EDGE_CASES,
+    EdgeCase,
+    random_frame,
+)
 from typing import Any, Callable, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -49,12 +56,20 @@ import pytest
 
 from tmlt.core.utils import pandas_truncation
 from tmlt.core.utils.pandas_truncation import (
+    _NULL_DIGEST_CODE,
+    _column_values,
     _combined_hash,
+    _digest_codes,
+    _group_codes,
+    _group_key,
     _hash_columns,
     _hash_value,
     _java_double_to_string,
     _java_float_to_string,
+    _order_keys,
     _render_value,
+    _sorted_keys,
+    _tie_break_keys,
     _validate_column,
     drop_large_groups,
     limit_keys_per_group,
@@ -784,6 +799,570 @@ def test_hash_columns_of_no_columns_is_constant():
     assert list(hashes) == [_combined_hash(())] * 3
 
 
+def _dtype_matrix_frame() -> pd.DataFrame:
+    """Returns a frame with one column per entry of ``COLUMN_KINDS``.
+
+    Every nullable kind carries a null, the floating point kinds carry signed
+    zeros and NaNs, and the timestamp column carries a pre-epoch value and a
+    value with nanoseconds, so that each column exercises its kind's rendering
+    corners.
+    """
+    values_by_kind: dict = {
+        "int64": [1, -1, 9223372036854775807, 0],
+        "Int64": [1, None, -9223372036854775808, 7],
+        "string": ["a", None, "a,", _E_ACUTE],
+        "string_dtype": ["", None, "b", _CJK],
+        "float64": [0.0, -0.0, float("nan"), 5e-324],
+        "Float64": [1.5, None, 0.001, -1.5],
+        "object_float": [float("nan"), None, -0.0, 1e7],
+        "float32": [1 / 3, 0.0, float("inf"), 1e-4],
+        "date": [
+            datetime.date(1, 1, 1),
+            None,
+            datetime.date(9999, 12, 31),
+            datetime.date(2024, 2, 29),
+        ],
+        "timestamp": [
+            datetime.datetime(2020, 1, 1, 0, 0, 0, 500000),
+            None,
+            datetime.datetime(1969, 12, 31, 23, 59, 59, 999999),
+            pd.Timestamp("2020-01-01 00:00:00.000000001"),
+        ],
+        "binary": [b"", None, b"\xff\xfe", b"a,b"],
+    }
+    assert set(values_by_kind) == set(COLUMN_KINDS)
+    return pd.DataFrame(
+        {
+            name: pd.Series(values_by_kind[name], dtype=object).astype(
+                kind.pandas_dtype
+            )
+            for name, kind in COLUMN_KINDS.items()
+        }
+    )
+
+
+def _assert_hash_columns_agree(df: pd.DataFrame, cols: List[str]) -> None:
+    """Asserts that ``_hash_columns`` equals the row-wise ``_combined_hash``.
+
+    ``_combined_hash`` is pinned by the frozen ``COMBINED_VECTORS``, which are
+    pinned by Spark, so this transitively pins the vectorized column hashing
+    without a JVM.
+    """
+    actual = list(_hash_columns(df, cols))
+    if cols:
+        expected = [
+            _combined_hash(row)
+            for row in zip(*[list(_column_values(df[c])) for c in cols])
+        ]
+    else:
+        # zip(*[]) yields nothing, but hashing no columns yields the digest of
+        # no values once per row.
+        expected = [_combined_hash(())] * len(df)
+    assert actual == expected, f"digests diverge for columns {cols}"
+
+
+def _assert_hash_columns_agree_on_subsets(
+    df: pd.DataFrame, extra: Optional[List[str]] = None
+) -> None:
+    """Checks hashing agreement on the standard column subsets of ``df``.
+
+    The subsets are the full column list, no columns at all, and each single
+    column, plus ``extra`` (the grouping and key columns) when given.
+    """
+    subsets: List[List[str]] = [list(df.columns), []]
+    subsets.extend([column] for column in df.columns)
+    if extra is not None:
+        subsets.append(extra)
+    for cols in subsets:
+        _assert_hash_columns_agree(df, cols)
+
+
+def _seeded_random_cases() -> List[EdgeCase]:
+    """Returns the 20 seeded random frames shared by the test corpora."""
+    return [
+        random_frame(
+            random.Random(seed),
+            n_rows=10 + seed % 8,
+            n_groups=1 + seed % 4,
+            dup_rate=0.4,
+        )
+        for seed in range(20)
+    ]
+
+
+@parametrize(Case(case.id)(case=case) for case in EDGE_CASES)
+def test_hash_columns_agrees_with_row_wise_combined_hash(case: EdgeCase):
+    """The vectorized hashing equals hashing each row's values one at a time.
+
+    This is the central bit-compatibility gate for the column-major hashing:
+    it runs over every curated edge case, for the full column list, each
+    single column, the grouping and key columns, and no columns at all.
+    """
+    df = case.to_pandas()
+    _assert_hash_columns_agree_on_subsets(df, extra=[*case.grouping, *case.keys])
+
+
+def test_hash_columns_agrees_with_row_wise_combined_hash_on_random_frames():
+    """The vectorized hashing survives 20 seeded random frames."""
+    for case in _seeded_random_cases():
+        df = case.to_pandas()
+        _assert_hash_columns_agree_on_subsets(df, extra=[*case.grouping, *case.keys])
+
+
+def test_hash_columns_agrees_with_row_wise_combined_hash_on_dtype_matrix():
+    """The vectorized hashing handles one column of every supported kind."""
+    _assert_hash_columns_agree_on_subsets(_dtype_matrix_frame())
+
+
+def _reference_frames() -> List[Tuple[str, pd.DataFrame]]:
+    """Returns the frames the vectorized helpers are checked against.
+
+    The corpus is every curated edge case, the dtype-matrix frame, a frame
+    with a mixed-type object column (which exercises the ``_sorted_keys``
+    type-name fallback), a frame with ``NaT``, ``pd.NA``, ``NaN`` and ``None``
+    in one object column, and 20 seeded random frames.
+    """
+    frames = [(case.id, case.to_pandas()) for case in EDGE_CASES]
+    frames.append(("dtype-matrix", _dtype_matrix_frame()))
+    frames.append(
+        (
+            "mixed-object-column",
+            pd.DataFrame(
+                {
+                    "g": ["G"] * 6,
+                    "m": pd.Series(
+                        [1, "a", 2.5, None, float("nan"), b"x"], dtype=object
+                    ),
+                }
+            ),
+        )
+    )
+    frames.append(
+        (
+            "every-missing-flavor",
+            pd.DataFrame(
+                {
+                    "n": pd.Series(
+                        [pd.NaT, pd.NA, float("nan"), None, 1.5, "s"], dtype=object
+                    ),
+                }
+            ),
+        )
+    )
+    for seed, case in enumerate(_seeded_random_cases()):
+        frames.append((f"random-{seed}", case.to_pandas()))
+    return frames
+
+
+def test_digest_codes_never_merge_distinct_renderings():
+    """Two rows sharing a digest code always render to the same bytes.
+
+    Over-splitting is harmless (each split is rendered separately), but two
+    distinct renderings behind one code would silently corrupt digests, so
+    this sweeps every column of every corpus frame. Null codes must also
+    match the null digests exactly, in both directions.
+    """
+    checked = 0
+    for frame_id, df in _reference_frames():
+        for column in df.columns:
+            result = _digest_codes(df[column])
+            if result is None:
+                continue
+            codes, values = result
+            digests = [_hash_value(value) for value in _column_values(df[column])]
+            by_code: dict = {}
+            for code, digest in zip(codes, digests):
+                context = f"{frame_id}.{column}"
+                if code == _NULL_DIGEST_CODE:
+                    assert digest is None, context
+                else:
+                    assert digest is not None, context
+                    by_code.setdefault(code, set()).add(digest)
+            for code, code_digests in by_code.items():
+                assert len(code_digests) == 1, f"{frame_id}.{column} code {code}"
+                assert _hash_value(values[code]) in code_digests, (
+                    f"{frame_id}.{column} representative of code {code}"
+                )
+            checked += 1
+    assert checked > 0
+
+
+def test_digest_codes_separate_lookalike_values():
+    """Values that render differently never share a digest code.
+
+    For dtypes with no faithful factorization -- mixed object columns and
+    bytearrays -- ``_digest_codes`` must return None (never crash), which
+    sends the caller down the render-every-value path where conflation is
+    impossible.
+    """
+    float64 = pd.Series([0.0, -0.0], dtype="float64")
+    result = _digest_codes(float64)
+    assert result is not None
+    assert result[0][0] != result[0][1]
+
+    float32 = pd.Series([0.0, -0.0], dtype="float32")
+    result = _digest_codes(float32)
+    assert result is not None
+    assert result[0][0] != result[0][1]
+
+    # str and bytes of the same content render identically, but the mixed
+    # column has no faithful factorization and must take the fallback.
+    str_and_bytes = pd.Series(["abc", b"abc"], dtype=object)
+    assert _digest_codes(str_and_bytes) is None
+
+    # 1 and 1.0 render "1" and "1.0", but pd.factorize would merge them.
+    int_and_float = pd.Series([1, 1.0], dtype=object)
+    assert _digest_codes(int_and_float) is None
+
+    nan_and_null = pd.Series([float("nan"), None], dtype=object)
+    result = _digest_codes(nan_and_null)
+    assert result is not None
+    codes, values = result
+    assert codes[0] != codes[1]
+    assert codes[1] == _NULL_DIGEST_CODE
+    assert _hash_value(values[codes[0]]) == _hash_value(float("nan"))
+
+    nullable_float = pd.Series([pd.NA, 1.0], dtype="Float64")
+    result = _digest_codes(nullable_float)
+    assert result is not None
+    assert result[0][0] == _NULL_DIGEST_CODE
+    assert result[0][1] != _NULL_DIGEST_CODE
+
+    bytearrays = pd.Series([bytearray(b"a"), b"a"], dtype=object)
+    assert _digest_codes(bytearrays) is None
+
+
+def _first_occurrence_labels(values: Sequence[Any]) -> List[int]:
+    """Returns each value's label, numbering values by first occurrence.
+
+    Two label sequences are equal exactly when the two value sequences induce
+    the same partition of the positions.
+    """
+    labels: dict = {}
+    return [labels.setdefault(value, len(labels)) for value in values]
+
+
+def test_group_codes_match_group_key():
+    """Group codes induce exactly the partitions ``_group_key`` induces.
+
+    Unlike digest codes, group codes must be exact in both directions: an
+    over-split (0.0 versus -0.0, bytes versus bytearray) would change which
+    rows share a group, and hence which rows are truncated.
+    """
+    checked = 0
+    for frame_id, df in _reference_frames():
+        for column in df.columns:
+            codes = _group_codes(df[column])
+            assert codes.dtype == np.int64
+            assert len(codes) == len(df)
+            assert (codes >= 0).all()
+            keys = [_group_key(value) for value in _column_values(df[column])]
+            assert _first_occurrence_labels(list(codes)) == (
+                _first_occurrence_labels(keys)
+            ), f"{frame_id}.{column}"
+            checked += 1
+    assert checked > 0
+
+
+def _reference_order_codes(column: pd.Series) -> np.ndarray:
+    """Returns integer codes ordering a column the way Spark orders it.
+
+    This is a verbatim copy of commit a13253b's ``_order_codes``, kept here
+    as the reference the vectorized ``_order_keys`` is compared against.
+    """
+    keys = [_group_key(value) for value in _column_values(column)]
+    ranks = {key: rank for rank, key in enumerate(_sorted_keys(set(keys)))}
+    return np.array([ranks[key] for key in keys], dtype=np.int64)
+
+
+def _order_keys_lexsort_keys(df: pd.DataFrame, cols: List[str]) -> List[np.ndarray]:
+    """Returns the lexsort keys ``_order_keys`` produces for ``cols``.
+
+    The keys are assembled by the same ``_tie_break_keys`` the truncation
+    functions use, taken at every row, so this exercises the real assembly
+    convention rather than mirroring it.
+    """
+    order_keys = {column: _order_keys(df[column]) for column in cols}
+    return _tie_break_keys(order_keys, cols, np.arange(len(df)))
+
+
+def test_order_keys_match_reference_order():
+    """The vectorized sort keys reproduce the reference permutation exactly.
+
+    The permutations must be element-wise identical, not merely
+    order-equivalent: both sorts are stable, so any difference means a tie
+    was broken differently, which changes which rows survive a truncation
+    whenever digests collide.
+    """
+    checked = 0
+    for frame_id, df in _reference_frames():
+        columns = list(df.columns)
+        orderings = [columns, list(reversed(columns))]
+        if len(columns) > 2:
+            orderings.append(columns[1:] + columns[:1])
+        for cols in orderings:
+            expected = np.lexsort(
+                [_reference_order_codes(df[c]) for c in reversed(cols)]
+            )
+            actual = np.lexsort(_order_keys_lexsort_keys(df, cols))
+            assert (actual == expected).all(), f"{frame_id} {cols}"
+            checked += 1
+    assert checked > 0
+
+
+def test_group_codes_floor_nanoseconds_like_group_key():
+    """Pre-epoch sub-microsecond timestamps group and hash at Spark's grain.
+
+    numpy's ns-to-us cast must floor toward negative infinity, like
+    ``pd.Timestamp.floor``; truncating toward zero would shift every pre-epoch
+    sub-microsecond value into the wrong microsecond.
+    """
+    column = pd.Series(
+        [
+            pd.Timestamp("1969-12-31 23:59:59.999999999"),
+            pd.Timestamp("1969-12-31 23:59:59.999999001"),
+            pd.Timestamp("1969-12-31 23:59:59.000000001"),
+            pd.Timestamp("1969-12-31 23:59:59.000000999"),
+        ],
+        dtype="datetime64[ns]",
+    )
+    codes = _group_codes(column)
+    assert codes[0] == codes[1]
+    assert codes[2] == codes[3]
+    assert codes[0] != codes[2]
+    keys = [_group_key(value) for value in _column_values(column)]
+    assert _first_occurrence_labels(list(codes)) == _first_occurrence_labels(keys)
+    renderings = [_render_value(value) for value in _column_values(column)]
+    assert renderings[0] == renderings[1] == b"1969-12-31 23:59:59.999999"
+    assert renderings[2] == renderings[3] == b"1969-12-31 23:59:59"
+    hashes = list(_hash_columns(pd.DataFrame({"t": column}), ["t"]))
+    assert hashes[0] == hashes[1]
+    assert hashes[2] == hashes[3]
+    assert hashes[0] != hashes[2]
+    df = pd.DataFrame({"t": column})
+    expected = np.lexsort([_reference_order_codes(df["t"])])
+    actual = np.lexsort(_order_keys_lexsort_keys(df, ["t"]))
+    assert (actual == expected).all()
+
+
+def _run_all_three(
+    df: pd.DataFrame,
+    grouping: Sequence[str],
+    keys: Sequence[str],
+    threshold: int,
+) -> List[pd.DataFrame]:
+    """Runs all three truncation functions and returns their results."""
+    return [
+        truncate_large_groups(df, list(grouping), threshold),
+        drop_large_groups(df, list(grouping), threshold),
+        limit_keys_per_group(df, list(grouping), list(keys), threshold),
+    ]
+
+
+def test_fast_path_matches_full_path():
+    """The fast path returns exactly the frame the full path returns.
+
+    Every curated edge case at each of its thresholds, plus 30 seeded random
+    frames at thresholds 0, 1, 2, 3 and 7, are run twice -- once normally and
+    once with the fast path disabled -- and compared exactly, including row
+    order and dtypes. The sweep must hit all three group-size regimes (every
+    group oversized, none oversized, and a mixture), or the comparison could
+    pass vacuously.
+    """
+    cases = [(case, threshold) for case in EDGE_CASES for threshold in case.thresholds]
+    for seed in range(30):
+        case = random_frame(
+            random.Random(1000 + seed),
+            n_rows=8 + seed % 10,
+            n_groups=1 + seed % 5,
+            dup_rate=0.4,
+        )
+        cases.extend((case, threshold) for threshold in (0, 1, 2, 3, 7))
+    regimes = {"all-oversized": 0, "none-oversized": 0, "mixed": 0}
+    for case, threshold in cases:
+        df = case.to_pandas()
+        fast_results = _run_all_three(df, case.grouping, case.keys, threshold)
+        with pytest.MonkeyPatch.context() as patcher:
+            patcher.setattr(pandas_truncation, "_FAST_PATH_ENABLED", False)
+            full_results = _run_all_three(df, case.grouping, case.keys, threshold)
+        for fast, full in zip(fast_results, full_results):
+            pd.testing.assert_frame_equal(fast, full)
+        if len(df) == 0:
+            continue
+        if case.grouping:
+            row_keys = list(
+                zip(
+                    *[
+                        [_group_key(v) for v in _column_values(df[c])]
+                        for c in case.grouping
+                    ]
+                )
+            )
+        else:
+            row_keys = [()] * len(df)
+        sizes = Counter(row_keys)
+        oversized = [sizes[key] > threshold for key in row_keys]
+        if all(oversized):
+            regimes["all-oversized"] += 1
+        elif not any(oversized):
+            regimes["none-oversized"] += 1
+        else:
+            regimes["mixed"] += 1
+    assert all(count > 0 for count in regimes.values()), regimes
+
+
+def test_fast_path_still_validates():
+    """Unsupported columns raise even when nothing would be truncated.
+
+    A fast path that skips the hash must not skip validation: an unsupported
+    object value or a bool payload column raises whether the threshold
+    truncates anything (threshold 0) or nothing (a huge threshold).
+    """
+    decimals = pd.DataFrame(
+        {
+            "g": ["a", "b"],
+            "v": pd.Series(
+                [decimal.Decimal("1.5"), decimal.Decimal("2.5")], dtype=object
+            ),
+        }
+    )
+    for threshold in (0, 100):
+        with pytest.raises(NotImplementedError, match="Unsupported data type"):
+            truncate_large_groups(decimals, ["g"], threshold)
+        with pytest.raises(NotImplementedError, match="Unsupported data type"):
+            limit_keys_per_group(decimals, ["g"], ["v"], threshold)
+    flags = pd.DataFrame({"g": ["a", "b"], "flag": [True, False]})
+    for threshold in (0, 100):
+        with pytest.raises(NotImplementedError, match="for column flag"):
+            truncate_large_groups(flags, ["g"], threshold)
+
+
+def test_output_row_order_is_input_order():
+    """Survivors are returned in input order, not in hash order.
+
+    The frames are built so that the hash order of the survivors provably
+    differs from their input order (asserted below, so the test cannot pass
+    vacuously): the hash decides which rows survive, never how they are
+    returned.
+    """
+    df = pd.DataFrame(
+        {
+            "g": ["G"] * 8 + ["H"] * 2,
+            "k": [f"k{i}" for i in range(8)] + ["k0", "k1"],
+            "row": list(range(10)),
+        }
+    )
+    # truncate_large_groups: G is oversized at threshold 7, so one G row is
+    # dropped. All rows are distinct, so every salt is 1 and the digests can
+    # be recomputed here.
+    result = truncate_large_groups(df, ["g"], 7)
+    assert list(result["row"]) == sorted(result["row"])
+    digests = [
+        _combined_hash((g, k, row, 1))
+        for g, k, row in zip(df["g"][:8], df["k"][:8], df["row"][:8])
+    ]
+    by_digest = [row for _, row in sorted(zip(digests, range(8)))][:7]
+    surviving = [row for row in result["row"] if row < 8]
+    assert sorted(by_digest) == surviving  # the hash decided who survives
+    assert by_digest != surviving  # ...but the hash order differs
+
+    # limit_keys_per_group: G has 8 distinct keys at threshold 7, so one key
+    # is dropped; the (g, k) digests below are the pair digests.
+    result = limit_keys_per_group(df, ["g"], ["k"], 7)
+    assert list(result["row"]) == sorted(result["row"])
+    pair_digests = [_combined_hash((g, k)) for g, k in zip(df["g"][:8], df["k"][:8])]
+    by_digest = [row for _, row in sorted(zip(pair_digests, range(8)))][:7]
+    surviving = [row for row in result["row"] if row < 8]
+    assert sorted(by_digest) == surviving
+    assert by_digest != surviving
+
+    # drop_large_groups: G is dropped entirely, H survives in input order.
+    result = drop_large_groups(df, ["g"], 7)
+    assert list(result["row"]) == [8, 9]
+
+
+def test_sort_breaks_duplicate_digest_ties_by_value_columns():
+    """Rows with colliding digests are ordered by their values, nulls first.
+
+    These two rows collide by construction -- a null contributes nothing to
+    the combined hash, so hashing (nan, "A", skipped) and (skipped, "nan",
+    "A") concatenates the same three per-value digests. The tie must be
+    broken by the value columns, where Spark sorts the null in column ``a``
+    before the NaN.
+    """
+    df = pd.DataFrame(
+        {
+            "g": pd.Series(["G", "G"], dtype=object),
+            "a": pd.Series([float("nan"), None], dtype=object),
+            "b": pd.Series(["A", "nan"], dtype=object),
+            "c": pd.Series([None, "A"], dtype=object),
+        }
+    )
+    assert len(set(_hash_columns(df, ["g", "a", "b", "c"]))) == 1
+    result = truncate_large_groups(df, ["g"], 1)
+    assert len(result) == 1
+    assert result["a"][0] is None
+    assert result["b"][0] == "nan"
+    assert result["c"][0] == "A"
+
+
+def test_validate_column_shortcut_matches_value_scan():
+    """Validation raises exactly when rendering every value would raise.
+
+    This is what makes the ``infer_dtype`` accept-list safe: for every
+    unsupported value, every supported value type, and the ambiguous
+    mixtures, the shortcut must agree with a literal per-value scan. The
+    table includes the kinds deliberately left out of the accept list --
+    ``floating`` (np.float16 has no Spark rendering) and ``date`` (a date
+    column may also hold timezone-aware datetimes).
+    """
+    aware = datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc)
+    tables: List[List[Any]] = [[value] for _, value in _UNSUPPORTED_OBJECT_VALUES]
+    tables += [
+        ["a"],
+        [b"a"],
+        [bytearray(b"a")],
+        [1],
+        [2**70],
+        [np.int32(5)],
+        [1.5],
+        [np.float32(1.5)],
+        [np.float64(1.5)],
+        [float("nan")],
+        [float("inf")],
+        [datetime.date(2020, 1, 1)],
+        [datetime.datetime(2020, 1, 1)],
+        ["a", float("nan")],
+        ["a", None],
+        [b"a", bytearray(b"a")],
+        [datetime.date(2020, 1, 1), None],
+        [aware],
+        [],
+        [None, None],
+        # Kinds that must keep the per-value scan: np.float16 and
+        # np.longdouble infer as "floating" but have no Spark rendering, and
+        # a timezone-aware datetime mixed into a date column infers as "date".
+        [np.float16(1.5)],
+        [np.longdouble(1.5)],
+        [datetime.date(2020, 1, 1), aware],
+        [1, True],
+        [1, 1.5],
+    ]
+    for values in tables:
+        column = pd.Series(values, dtype=object)
+        expected_error: Optional[NotImplementedError] = None
+        try:
+            for value in _column_values(column):
+                _render_value(value)
+        except NotImplementedError as error:
+            expected_error = error
+        if expected_error is None:
+            _validate_column(column, "c")
+        else:
+            with pytest.raises(NotImplementedError):
+                _validate_column(column, "c")
+
+
 ################################################################################
 # Error contracts
 ################################################################################
@@ -1006,9 +1585,11 @@ def test_limit_keys_per_group_hash_collisions(monkeypatch: pytest.MonkeyPatch):
     This is the pandas counterpart of the regression test for #2455. Spark
     breaks ties in ``dense_rank`` with the key columns, so two keys whose hashes
     collide are still ranked in key order rather than being given the same rank.
+    The collision is forced at the ``_combine_digests`` seam, the single point
+    every row's combined digest passes through.
     """
     monkeypatch.setattr(
-        pandas_truncation, "_combined_hash", lambda values: _COLLIDING_HASH
+        pandas_truncation, "_combine_digests", lambda digests: _COLLIDING_HASH
     )
     df = pd.DataFrame({"A": [1, 1, 1, 1, 2, 2, 2, 2], "B": [1, 1, 2, 2, 1, 2, 3, 4]})
     assert_dataframe_equal(
@@ -1025,10 +1606,12 @@ def test_truncate_large_groups_hash_collisions(monkeypatch: pytest.MonkeyPatch):
     """Colliding row hashes fall back to the whole row, nulls first.
 
     Spark orders the rows of a group by the hash and then by every column, with
-    nulls sorting first, so a constant hash degenerates into that ordering.
+    nulls sorting first, so a constant hash degenerates into that ordering. The
+    collision is forced at the ``_combine_digests`` seam, the single point
+    every row's combined digest passes through.
     """
     monkeypatch.setattr(
-        pandas_truncation, "_combined_hash", lambda values: _COLLIDING_HASH
+        pandas_truncation, "_combine_digests", lambda digests: _COLLIDING_HASH
     )
     df = pd.DataFrame({"A": ["a", "a", "a", "b"], "B": [None, "z", "y", "x"]})
     assert_dataframe_equal(
@@ -1048,15 +1631,47 @@ def test_truncate_large_groups_hash_collisions_with_duplicate_rows(
 
     The per-duplicate salt only ever reaches the hash, so when the hash is
     constant it cannot separate identical rows: the tie is broken by the row
-    values, and the group is filled from the smallest row upwards.
+    values, and the group is filled from the smallest row upwards. The
+    collision is forced at the ``_combine_digests`` seam, the single point
+    every row's combined digest passes through.
     """
     monkeypatch.setattr(
-        pandas_truncation, "_combined_hash", lambda values: _COLLIDING_HASH
+        pandas_truncation, "_combine_digests", lambda digests: _COLLIDING_HASH
     )
     df = pd.DataFrame({"A": ["a"] * 4, "B": ["y", "x", "y", "x"]})
     assert_dataframe_equal(
         truncate_large_groups(df, ["A"], 3),
         pd.DataFrame({"A": ["a", "a", "a"], "B": ["x", "x", "y"]}),
+    )
+
+
+def test_combine_digests_is_the_only_hash_seam(monkeypatch: pytest.MonkeyPatch):
+    """Every combined digest still flows through the _combine_digests seam.
+
+    The four hash-collision regression tests patch ``_combine_digests`` with a
+    constant; if a refactor inlined the combiner somewhere, those tests would
+    patch a function nothing calls and pass vacuously. This test fails
+    instead: with the seam patched, every digest ``_hash_columns`` produces
+    must be the constant, and truncation must degenerate into the value
+    ordering no matter what the values are.
+    """
+    monkeypatch.setattr(
+        pandas_truncation, "_combine_digests", lambda digests: _COLLIDING_HASH
+    )
+    df = pd.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"], "c": ["p", None, "q"]})
+    assert set(_hash_columns(df, ["a", "b", "c"])) == {_COLLIDING_HASH}
+    # Two frames that differ only in their values (with the same value order)
+    # truncate identically when every digest is the constant; live hashing
+    # would order their rows differently.
+    small = pd.DataFrame({"A": ["a", "a", "a", "b"], "B": [4, 3, 2, 1]})
+    large = pd.DataFrame({"A": ["a", "a", "a", "b"], "B": [40, 30, 20, 10]})
+    assert_dataframe_equal(
+        truncate_large_groups(small, ["A"], 2),
+        pd.DataFrame({"A": ["a", "a", "b"], "B": [2, 3, 1]}),
+    )
+    assert_dataframe_equal(
+        truncate_large_groups(large, ["A"], 2),
+        pd.DataFrame({"A": ["a", "a", "b"], "B": [20, 30, 10]}),
     )
 
 
@@ -1133,11 +1748,12 @@ def test_ordering_puts_nulls_first_and_nans_last(
     """Ties are broken in Spark's ascending order, not in pandas'.
 
     Spark's ascending order puts nulls first and NaNs last, while pandas'
-    ``na_position`` puts both in the same place. A constant hash leaves the
-    ordering of the value columns to decide which rows survive.
+    ``na_position`` puts both in the same place. A constant hash, forced at
+    the ``_combine_digests`` seam, leaves the ordering of the value columns to
+    decide which rows survive.
     """
     monkeypatch.setattr(
-        pandas_truncation, "_combined_hash", lambda values: _COLLIDING_HASH
+        pandas_truncation, "_combine_digests", lambda digests: _COLLIDING_HASH
     )
     df = pd.DataFrame(
         {

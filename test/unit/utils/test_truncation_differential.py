@@ -43,6 +43,7 @@ from test.unit.utils.truncation_testing import (
     ROW_ID_COLUMN,
     SIMPLE_DTYPE_MENU,
     EdgeCase,
+    apply_truncation,
     random_frame,
     spark_df_from_case,
     utc_session_timezone,
@@ -198,17 +199,9 @@ def _spark_result(
     Returns:
         The result of the Spark function, converted with ``toPandas()``.
     """
-    grouping = list(case.grouping)
-    if function == "truncate_large_groups":
-        result = truncation.truncate_large_groups(sdf, grouping, threshold)
-    elif function == "drop_large_groups":
-        result = truncation.drop_large_groups(sdf, grouping, threshold)
-    elif function == "limit_keys_per_group":
-        result = truncation.limit_keys_per_group(
-            sdf, grouping, list(case.keys), threshold
-        )
-    else:
-        raise ValueError(f"Unknown truncation function {function}")
+    result = apply_truncation(
+        truncation, function, sdf, case.grouping, case.keys, threshold
+    )
     return result.toPandas()
 
 
@@ -227,17 +220,14 @@ def _pandas_result(case: EdgeCase, function: str, threshold: int) -> pd.DataFram
     Returns:
         The result of the pandas function.
     """
-    df = case.to_pandas()
-    grouping = list(case.grouping)
-    if function == "truncate_large_groups":
-        return pandas_truncation.truncate_large_groups(df, grouping, threshold)
-    if function == "drop_large_groups":
-        return pandas_truncation.drop_large_groups(df, grouping, threshold)
-    if function == "limit_keys_per_group":
-        return pandas_truncation.limit_keys_per_group(
-            df, grouping, list(case.keys), threshold
-        )
-    raise ValueError(f"Unknown truncation function {function}")
+    return apply_truncation(
+        pandas_truncation,
+        function,
+        case.to_pandas(),
+        case.grouping,
+        case.keys,
+        threshold,
+    )
 
 
 def _survivor_row_ids(df: pd.DataFrame) -> Set[int]:

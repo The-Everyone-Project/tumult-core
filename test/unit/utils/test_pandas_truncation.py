@@ -56,7 +56,9 @@ import pytest
 
 from tmlt.core.utils import pandas_truncation
 from tmlt.core.utils.pandas_truncation import (
+    _NAN_ORDER,
     _NULL_DIGEST_CODE,
+    _NULL_ORDER,
     _column_values,
     _combined_hash,
     _digest_codes,
@@ -1347,6 +1349,20 @@ def test_validate_column_shortcut_matches_value_scan():
         [datetime.date(2020, 1, 1), aware],
         [1, True],
         [1, 1.5],
+        # NA-like values are invisible to infer_dtype(skipna=True), so they
+        # must be checked whatever the kind says: a float NaN is renderable,
+        # an exotic-float NaN is not.
+        ["a", np.float16("nan")],
+        [b"a", np.longdouble("nan")],
+        [1, np.float16("nan")],
+        [np.float16("nan")],
+        # Date and datetime columns are validated once per distinct value;
+        # repeated values, renderable and not, must not change the outcome.
+        [datetime.date(2020, 1, 1), datetime.date(2020, 1, 1), aware, aware],
+        [datetime.datetime(2020, 1, 1)] * 3,
+        [datetime.date(2020, 1, 1), datetime.datetime(2020, 1, 1), None],
+        [datetime.date(2020, 1, 1), float("nan")],
+        [datetime.date(2020, 1, 1), np.float16("nan")],
     ]
     for values in tables:
         column = pd.Series(values, dtype=object)
@@ -1428,6 +1444,37 @@ def test_validate_column_rejects_unsupported_object_values(value: Any):
     """An object column is checked value by value, since it has no dtype of its own."""
     with pytest.raises(NotImplementedError, match="Unsupported data type"):
         _validate_column(pd.Series([value], dtype=object), "c")
+
+
+@parametrize(
+    Case("float16-nan-in-string-kind")(values=["a", "b", np.float16("nan")]),
+    Case("longdouble-nan-in-string-kind")(values=["a", "b", np.longdouble("nan")]),
+    Case("float16-nan-in-bytes-kind")(values=[b"a", np.float16("nan")]),
+    Case("float16-nan-in-integer-kind")(values=[1, 2, np.float16("nan")]),
+    Case("float16-nan-alone")(values=[np.float16("nan")]),
+)
+def test_na_like_values_hidden_from_kind_inference_are_rejected(values: List[Any]):
+    """An exotic-float NaN cannot hide behind a renderable column kind.
+
+    ``infer_dtype(skipna=True)`` skips NA-like values, so a ``string``-kind
+    column can still hold an ``np.float16("nan")`` -- a value Spark cannot
+    hold, which the reference per-value scan rejected. Hashing it as
+    ``b"nan"`` instead of raising would let cross-backend divergence go
+    undetected.
+    """
+    df = pd.DataFrame(
+        {
+            "g": pd.Series(["G"] * len(values), dtype=object),
+            "v": pd.Series(values, dtype=object),
+        }
+    )
+    with pytest.raises(NotImplementedError, match="Unsupported data type"):
+        truncate_large_groups(df, ["g"], 2)
+    with pytest.raises(NotImplementedError, match="Unsupported data type"):
+        limit_keys_per_group(df, ["g"], ["v"], 2)
+    # drop_large_groups hashes nothing, so it never raises; the value falls
+    # into the NaN group, exactly where the reference implementation put it.
+    assert len(drop_large_groups(df, ["v"], 1)) == len(values)
 
 
 def test_empty_object_column_cannot_be_validated():
@@ -1792,6 +1839,46 @@ def test_bytes_and_bytearrays_of_the_same_content_are_one_group():
     assert list(drop_large_groups(df, ["b"], 1)["b"]) == [b"\x02"]
 
 
+def test_group_key_classifies_na_like_values_as_nans():
+    """NA-like values outside the float branch key as NaNs, not as values.
+
+    ``Decimal("NaN")`` and a raw ``np.datetime64("NaT")`` compare unequal to
+    themselves, so keying them by value would give every occurrence a
+    singleton group of its own. They take the NaN key instead, which is also
+    where ``_null_and_nan_masks`` puts them on the vectorized paths; the null
+    flavors stay nulls, distinct from the NaNs.
+    """
+    for value in (
+        decimal.Decimal("NaN"),
+        np.datetime64("NaT"),
+        np.timedelta64("NaT"),
+    ):
+        assert _group_key(value) == (_NAN_ORDER, 0), repr(value)
+    assert _group_key(decimal.Decimal("NaN")) == _group_key(float("nan"))
+    assert _group_key(None) == (_NULL_ORDER, 0)
+    assert _group_key(pd.NaT) == (_NULL_ORDER, 0)
+    assert _group_key(decimal.Decimal("1")) == (1, decimal.Decimal("1"))
+
+
+@parametrize(
+    Case("decimal-nan")(value=decimal.Decimal("NaN")),
+    Case("datetime64-nat")(value=np.datetime64("NaT")),
+    Case("timedelta64-nat")(value=np.timedelta64("NaT")),
+)
+def test_drop_large_groups_bounds_groups_of_na_like_values(value: Any):
+    """An oversized group of self-unequal NA-like values is dropped whole.
+
+    Keying such values by value would split the group into singletons that
+    all pass the threshold, breaking the rows-per-group bound that
+    ``drop_large_groups`` owes the stability guarantee.
+    """
+    df = pd.DataFrame(
+        {"A": pd.Series([value, value, "x"], dtype=object), "B": [1, 2, 3]}
+    )
+    assert list(drop_large_groups(df, ["A"], 1)["B"]) == [3]
+    assert list(drop_large_groups(df, ["A"], 2)["B"]) == [1, 2, 3]
+
+
 @parametrize(
     Case("threshold-2-drops-the-group")(threshold=2, expected=0),
     Case("threshold-3-keeps-the-group")(threshold=3, expected=3),
@@ -1818,6 +1905,50 @@ def test_nanoseconds_do_not_split_a_group(threshold: int, expected: int):
     )
     assert len(set(_hash_columns(df, ["t"]))) == 1
     assert len(drop_large_groups(df, ["t"], threshold)) == expected
+
+
+@pytest.mark.skipif(
+    int(pd.__version__.split(".", maxsplit=1)[0]) < 2,
+    reason="pandas 1.x cannot hold a non-nanosecond datetime column",
+)
+def test_non_nanosecond_datetime_columns_are_never_narrowed():
+    """Coarse-unit datetime columns hash and group at their own precision.
+
+    On pandas 2 (the supported pandas for Python 3.12 and later), an
+    Arrow/Spark round trip produces ``datetime64[us]`` columns, whose
+    Spark-legal values can lie outside the nanosecond range. A cast to
+    ``datetime64[ns]`` silently wraps such values -- 2500-01-01 becomes
+    1915-06-14 -- so the wrong value would be hashed, grouped, and ordered.
+    """
+    values = [
+        datetime.datetime(2500, 1, 1),
+        datetime.datetime(9999, 12, 31),
+        datetime.datetime(2020, 1, 1),
+    ]
+    expected = [_combined_hash((value,)) for value in values]
+    for unit in ("s", "ms", "us"):
+        df = pd.DataFrame(
+            {"t": pd.Series(np.array(values, dtype=f"datetime64[{unit}]"))}
+        )
+        assert list(_hash_columns(df, ["t"])) == expected, unit
+    # NaT is still a null, not a wrapped value.
+    with_nat = pd.DataFrame(
+        {"t": pd.Series(np.array([values[0], None], dtype="datetime64[us]"))}
+    )
+    assert list(_hash_columns(with_nat, ["t"])) == [expected[0], _combined_hash(())]
+    # Grouping sees the same precision: two rows of 2500-01-01 and one of
+    # 9999-12-31 are two groups, and distinct far-range values never alias.
+    grouped = pd.DataFrame(
+        {
+            "t": pd.Series(
+                np.array([values[0], values[0], values[1]], dtype="datetime64[us]")
+            ),
+            "v": [1, 2, 3],
+        }
+    )
+    assert list(drop_large_groups(grouped, ["t"], 1)["v"]) == [3]
+    codes = _group_codes(grouped["t"])
+    assert codes[0] == codes[1] != codes[2]
 
 
 ################################################################################

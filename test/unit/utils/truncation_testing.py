@@ -90,10 +90,13 @@ __all__ = [
     "SIMPLE_DTYPE_MENU",
     "EdgeCase",
     "TruncationBackend",
+    "apply_truncation",
     "grouped_symdiff_distance",
     "make_pandas_backend",
     "make_spark_backend",
     "multiset_symdiff",
+    "normalize_value",
+    "normalized_rows",
     "python_rows_from_pandas",
     "random_frame",
     "spark_df_from_case",
@@ -345,6 +348,49 @@ class TruncationBackend:
     truncate_large_groups: Callable[..., pd.DataFrame]
     drop_large_groups: Callable[..., pd.DataFrame]
     limit_keys_per_group: Callable[..., pd.DataFrame]
+
+
+def apply_truncation(
+    implementation: Any,
+    function: str,
+    df: Any,
+    grouping_columns: Sequence[str],
+    key_columns: Sequence[str],
+    threshold: int,
+) -> Any:
+    """Calls one of the three truncation functions of an implementation by name.
+
+    This is the single dispatch point for tests and helpers that are
+    parametrized over the function name, so that adding or renaming a
+    truncation function is one edit rather than one per call site.
+
+    Args:
+        implementation: Anything carrying the three truncation functions as
+            attributes with their usual signatures: a
+            :class:`TruncationBackend`, :mod:`tmlt.core.utils.truncation`, or
+            :mod:`tmlt.core.utils.pandas_truncation`.
+        function: The name of the function to call.
+        df: The dataframe to truncate, of whatever type ``implementation``
+            accepts.
+        grouping_columns: The grouping columns.
+        key_columns: The key columns. Only ``limit_keys_per_group`` reads
+            them.
+        threshold: The truncation threshold.
+
+    Returns:
+        Whatever the called function returns.
+    """
+    if function == "truncate_large_groups":
+        return implementation.truncate_large_groups(
+            df, list(grouping_columns), threshold
+        )
+    if function == "drop_large_groups":
+        return implementation.drop_large_groups(df, list(grouping_columns), threshold)
+    if function == "limit_keys_per_group":
+        return implementation.limit_keys_per_group(
+            df, list(grouping_columns), list(key_columns), threshold
+        )
+    raise ValueError(f"Unknown truncation function {function}")
 
 
 def make_spark_backend(
@@ -1580,7 +1626,7 @@ _NULL = "\x00tmlt-null"
 _NAN = "\x00tmlt-nan"
 
 
-def _normalize_value(value: Any) -> Any:
+def normalize_value(value: Any) -> Any:
     """Returns a hashable, backend-independent stand-in for a cell value.
 
     Missing values of every flavor (``None``, ``pd.NA``, ``NaT``) collapse onto
@@ -1620,11 +1666,11 @@ def _normalize_value(value: Any) -> Any:
     return value
 
 
-def _normalized_rows(df: pd.DataFrame, columns: Sequence[str]) -> List[Tuple[Any, ...]]:
+def normalized_rows(df: pd.DataFrame, columns: Sequence[str]) -> List[Tuple[Any, ...]]:
     """Returns the given columns of a dataframe as normalized row tuples."""
     if not len(df):
         return []
-    series = [[_normalize_value(value) for value in df[name]] for name in columns]
+    series = [[normalize_value(value) for value in df[name]] for name in columns]
     return [tuple(values) for values in zip(*series)]
 
 
@@ -1643,7 +1689,7 @@ def multiset_symdiff(a: pd.DataFrame, b: pd.DataFrame) -> int:
     """Returns the size of the multiset symmetric difference of two frames.
 
     Rows are compared by value, ignoring order and dtypes (see
-    :func:`_normalize_value`); a row appearing twice in ``a`` and once in ``b``
+    :func:`normalize_value`); a row appearing twice in ``a`` and once in ``b``
     contributes 1.
 
     Args:
@@ -1656,8 +1702,8 @@ def multiset_symdiff(a: pd.DataFrame, b: pd.DataFrame) -> int:
         to turn it into ``b``.
     """
     columns = _aligned_columns(a, b)
-    counts_a = Counter(_normalized_rows(a, columns))
-    counts_b = Counter(_normalized_rows(b, columns))
+    counts_a = Counter(normalized_rows(a, columns))
+    counts_b = Counter(normalized_rows(b, columns))
     return sum(
         abs(counts_a[row] - counts_b[row]) for row in set(counts_a) | set(counts_b)
     )
@@ -1669,7 +1715,7 @@ def _group_pairs(
     """Returns the set of (group key, row multiset) pairs of a dataframe."""
     indices = [list(columns).index(name) for name in group_columns]
     groups: Dict[Tuple[Any, ...], Counter] = {}
-    for row in _normalized_rows(df, columns):
+    for row in normalized_rows(df, columns):
         key = tuple(row[index] for index in indices)
         groups.setdefault(key, Counter())[row] += 1
     return {(key, frozenset(rows.items())) for key, rows in groups.items()}

@@ -14,7 +14,10 @@ Compatibility with :mod:`tmlt.core.utils.truncation`:
           which corresponds to Spark's ``IntegerType`` and ``LongType``;
         * ``float32`` or ``Float32`` (Spark ``FloatType``), and ``float64`` or
           ``Float64`` (Spark ``DoubleType``);
-        * ``datetime64[ns]`` without a timezone (Spark ``TimestampType``);
+        * ``datetime64`` without a timezone (Spark ``TimestampType``), in the
+          ``ns`` unit or, on pandas 2, any of the coarser ``s``/``ms``/``us``
+          units -- whose values may lie far outside the ``ns`` range and are
+          hashed at their own precision, never through a narrowing cast;
         * ``object`` and the pandas string dtypes, whose values may be
           :class:`str` (Spark ``StringType``), :class:`bytes` or
           :class:`bytearray` (Spark ``BinaryType``),
@@ -147,6 +150,7 @@ from typing import (
     Any,
     Callable,
     Collection,
+    Dict,
     Iterator,
     List,
     Mapping,
@@ -188,12 +192,15 @@ _NULL_DIGEST_CODE = -1
 #: which render differently) are deliberately absent.
 _HOMOGENEOUS_OBJECT_KINDS = frozenset({"string", "bytes", "empty"})
 
-#: Object-column kinds whose values are all renderable, so that validation
-#: needs no per-value scan. ``datetime`` is deliberately absent, because a
-#: timezone-aware datetime must still be rejected. So are ``floating``, which
-#: also covers ``np.float16`` and ``np.longdouble`` values that have no Spark
-#: rendering, and ``date``, which also covers columns mixing dates with
-#: (possibly timezone-aware) datetimes; both kinds therefore keep the scan.
+#: Object-column kinds whose non-NA values are all renderable, so that
+#: validation needs no per-value scan (the NA-like values, which the
+#: ``skipna=True`` kind inference cannot see, are always checked separately).
+#: ``datetime`` is deliberately absent, because a timezone-aware datetime must
+#: still be rejected, and so is ``date``, which also covers columns mixing
+#: dates with (possibly timezone-aware) datetimes; both keep a scan, at one
+#: rendering per distinct value. ``floating`` also covers ``np.float16`` and
+#: ``np.longdouble`` values that have no Spark rendering, and equal floats of
+#: different widths may differ in renderability, so it keeps the full scan.
 _RENDERABLE_OBJECT_KINDS = frozenset({"string", "bytes", "integer", "empty"})
 
 #: Whether the fast paths that restrict hashing to the rows that can actually
@@ -436,13 +443,51 @@ def _validate_column(column: pd.Series, name: str) -> None:
         # checked. An empty one carries no values and so cannot be checked,
         # unlike the Spark schema it corresponds to. When the column's
         # inferred kind proves that every value it can hold is renderable,
-        # the per-value scan is skipped.
-        if _object_kind(column) in _RENDERABLE_OBJECT_KINDS:
+        # the per-value scan is skipped -- except at the positions the
+        # ``skipna=True`` kind inference skipped: an NA-like value with no
+        # Spark rendering, such as ``np.float16("nan")``, is invisible to
+        # every kind, so the values classified as NaNs are still rendered.
+        # A genuine float NaN renders as ``b"nan"``; anything else raises
+        # here exactly as it does on the full scan.
+        kind = _object_kind(column)
+        if kind in _RENDERABLE_OBJECT_KINDS:
+            _render_nan_classified_values(column.to_numpy())
+            return
+        if kind in ("date", "datetime"):
+            # Every value is a date or a (possibly timezone-aware) datetime,
+            # where two equal values always render identically or both
+            # raise -- a timezone-aware datetime never equals a naive one --
+            # so rendering one value per distinct value is exactly the full
+            # scan, at one rendering per *distinct* date rather than per row.
+            # The first failing distinct value, in order of first appearance,
+            # is the first failing value of the full scan, so the error is
+            # the same one. NA-like values are invisible to the
+            # factorization, as they are to the kind, and are checked as
+            # above.
+            values = column.to_numpy()
+            for value in pd.factorize(values)[1]:
+                _render_value(value)
+            _render_nan_classified_values(values)
             return
         for value in _column_values(column):
             _render_value(value)
         return
     raise NotImplementedError(message)
+
+
+def _render_nan_classified_values(values: np.ndarray) -> None:
+    """Renders every value of an object array that classifies as a NaN.
+
+    This is the validation for the values ``infer_dtype(skipna=True)`` cannot
+    see. The null-classified values need no check -- they render as ``None``
+    whatever they are -- but a NaN-classified value is hashed as a value, so
+    it must render: a float NaN renders as ``b"nan"``, and an NA-like value
+    with no Spark rendering, such as ``np.float16("nan")`` or a stray
+    ``np.datetime64("NaT")``, raises :class:`NotImplementedError`.
+    """
+    _, nan_mask = _null_and_nan_masks(values)
+    for position in np.flatnonzero(nan_mask):
+        _render_value(values[position])
 
 
 def _object_kind(column: pd.Series) -> str:
@@ -497,17 +542,28 @@ def _nullable_int_values(column: pd.Series) -> np.ndarray:
     return column.to_numpy(target, na_value=0)
 
 
-def _floored_micros(column: pd.Series) -> np.ndarray:
-    """Returns a datetime column as int64 microseconds, flooring nanoseconds.
+def _microsecond_keys(column: pd.Series) -> np.ndarray:
+    """Returns int64 keys grouping and ordering a datetime column like Spark.
 
-    Flooring to microseconds merges the sub-microsecond distinctions Spark
-    cannot see; numpy's cast floors toward negative infinity, like
-    ``Timestamp.floor``. ``NaT`` keeps its own sentinel value.
+    Two rows share a key exactly when their values agree at Spark's
+    microsecond resolution, and the keys ascend in Spark's timestamp order.
+    A nanosecond column is floored to microseconds, merging the
+    sub-microsecond distinctions Spark cannot see; numpy's cast floors toward
+    negative infinity, like ``Timestamp.floor``. A column in a coarser unit
+    ('s', 'ms' or 'us', which pandas 2 allows) already carries no
+    sub-microsecond precision, so its own representation is the key:
+    converting it to nanoseconds, as ``to_numpy("datetime64[ns]")`` would,
+    silently wraps values outside the nanosecond range, such as 9999-12-31
+    in a microsecond column. ``NaT`` keeps its own sentinel value.
 
     Returns:
-        An int64 array aligned with ``column``.
+        An int64 array aligned with ``column``. Only equality and relative
+        order are meaningful; the unit is the column's own.
     """
-    return column.to_numpy("datetime64[ns]").astype("datetime64[us]").view("int64")
+    values = column.to_numpy()
+    if values.dtype == np.dtype("datetime64[ns]"):
+        values = values.astype("datetime64[us]")
+    return values.view("int64")
 
 
 def _digest_codes(column: pd.Series) -> Optional[Tuple[np.ndarray, Sequence[Any]]]:
@@ -565,12 +621,15 @@ def _digest_codes(column: pd.Series) -> Optional[Tuple[np.ndarray, Sequence[Any]
         codes, uniques = pd.factorize(column.to_numpy().view(bits_dtype))
         return codes, uniques.view(dtype)
     if pd.api.types.is_datetime64_dtype(dtype):
-        ints = column.to_numpy("datetime64[ns]").view("int64")
-        codes, uniques = pd.factorize(ints)
+        # The factorization stays in the column's own unit: converting to
+        # nanoseconds first would silently wrap values outside the nanosecond
+        # range, which non-nanosecond columns (pandas 2) can hold.
+        values = column.to_numpy()
+        codes, uniques = pd.factorize(values.view("int64"))
         codes[column.isna().to_numpy()] = _NULL_DIGEST_CODE
-        # Nanoseconds are deliberately kept: two values rendering alike may
-        # get different codes, which merely over-splits.
-        return codes, [pd.Timestamp(value) for value in uniques]
+        # Sub-microsecond precision is deliberately kept: two values
+        # rendering alike may get different codes, which merely over-splits.
+        return codes, [pd.Timestamp(value) for value in uniques.view(values.dtype)]
     if dtype == np.dtype(object) and _object_kind(column) in _HOMOGENEOUS_OBJECT_KINDS:
         values = column.to_numpy()
         try:
@@ -710,6 +769,15 @@ def _group_key(value: Any) -> Tuple[int, Any]:
         return (_VALUE_ORDER, bytes(value))
     if isinstance(value, pd.Timestamp) and value.nanosecond:
         return (_VALUE_ORDER, value.floor("us"))
+    if pd.api.types.is_scalar(value) and pd.isna(value):
+        # An NA-like value outside the branches above -- Decimal("NaN"), or a
+        # raw np.datetime64("NaT") in an object column -- compares unequal to
+        # itself, so keying it by value would make every occurrence a
+        # partition of its own and let an oversized group of them slip past
+        # drop_large_groups. Such values are keyed like the float NaNs they
+        # behave as, which is also where :func:`_null_and_nan_masks` puts
+        # them on the vectorized paths.
+        return (_NAN_ORDER, 0)
     return (_VALUE_ORDER, value)
 
 
@@ -816,7 +884,7 @@ def _group_codes(column: pd.Series) -> np.ndarray:
         return codes
     if pd.api.types.is_datetime64_dtype(dtype):
         # NaT keeps its own sentinel value and so its own partition.
-        return pd.factorize(_floored_micros(column))[0].astype(np.int64, copy=False)
+        return pd.factorize(_microsecond_keys(column))[0].astype(np.int64, copy=False)
     if dtype == np.dtype(object) and _object_kind(column) in _HOMOGENEOUS_OBJECT_KINDS:
         values = column.to_numpy()
         try:
@@ -946,7 +1014,7 @@ def _order_keys(column: pd.Series) -> _OrderKeys:
         return _OrderKeys(_order_classes(None, nan_mask), values)
     if pd.api.types.is_datetime64_dtype(dtype):
         null_mask = column.isna().to_numpy()
-        values = np.where(null_mask, np.int64(0), _floored_micros(column))
+        values = np.where(null_mask, np.int64(0), _microsecond_keys(column))
         return _OrderKeys(_order_classes(null_mask, None), values)
     if dtype == np.dtype(object) and _object_kind(column) in _HOMOGENEOUS_OBJECT_KINDS:
         objects = column.to_numpy()
@@ -1412,30 +1480,35 @@ def limit_keys_per_group(
     key_unique = list(dict.fromkeys(key_columns))
     group_code = {column: _group_codes(working_df[column]) for column in hashed_unique}
     group_ids = _group_ids([group_code[column] for column in grouping_unique], n)
-    digest_code = {
-        column: _digest_codes(working_df[column]) for column in hashed_unique
-    }
-    digest_code_arrays = [
-        codes_and_values[0]
-        for codes_and_values in digest_code.values()
-        if codes_and_values is not None
-    ]
-    # The budget test below uses a refinement of Spark's (group key, digest,
-    # key key) pair identity, which is only valid when EVERY hashed column
-    # contributed digest codes. A column that fell back to per-value
-    # rendering has no codes, and the refined identity would then be coarser
-    # than Spark's -- it would merge, for instance, an object column's 1 and
-    # 1.0, which share a group key but render "1" and "1.0" -- which would
-    # UNDER-count a group's keys and skip a group that needed truncating.
+    # The digest codes exist only to build the refined budget test below,
+    # which is only valid when EVERY hashed column contributed codes: a
+    # column that fell back to per-value rendering has none, and the refined
+    # identity would then be coarser than Spark's -- it would merge, for
+    # instance, an object column's 1 and 1.0, which share a group key but
+    # render "1" and "1.0" -- which would UNDER-count a group's keys and skip
+    # a group that needed truncating. The collection therefore stops at the
+    # first such column (and is skipped entirely when the fast path is off),
+    # rather than factorizing columns whose codes would be discarded unused.
+    digest_code: Optional[Dict[str, Tuple[np.ndarray, Sequence[Any]]]] = (
+        {} if _FAST_PATH_ENABLED else None
+    )
+    if digest_code is not None:
+        for column in hashed_unique:
+            codes_and_values = _digest_codes(working_df[column])
+            if codes_and_values is None:
+                digest_code = None
+                break
+            digest_code[column] = codes_and_values
     refined: Optional[_RefinedPairs] = None
-    if _FAST_PATH_ENABLED and len(digest_code_arrays) == len(digest_code):
+    if digest_code is not None:
         # Rows sharing a refined code necessarily share their group key,
         # their combined digest, and their key key, so counting refined
         # classes per group can only OVER-count a group's keys, which merely
         # hashes a group that needed no hashing (see the module docstring's
         # "Fast paths" section).
         refined_codes = _dense_codes(
-            [group_code[column] for column in hashed_unique] + digest_code_arrays
+            [group_code[column] for column in hashed_unique]
+            + [codes for codes, _ in digest_code.values()]
         )
         refined = _RefinedPairs(refined_codes, _first_occurrences(refined_codes))
         pairs_per_group = np.bincount(

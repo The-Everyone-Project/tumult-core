@@ -116,6 +116,31 @@ def oversized_fraction(df: pd.DataFrame, function: str, threshold: int) -> float
     return float(oversized.mean())
 
 
+def make_runner(implementation: Any, function: str, threshold: int) -> Callable:
+    """Returns a callable running one truncation function of an implementation.
+
+    This is the single dispatch point over the benchmarked function names; the
+    per-backend runners below only add their backend's plumbing.
+
+    Args:
+        implementation: The module carrying the three truncation functions.
+        function: The function to run.
+        threshold: The truncation threshold.
+
+    Returns:
+        A callable taking the input frame and returning the truncated frame.
+    """
+    if function == "truncate_large_groups":
+        return lambda df: implementation.truncate_large_groups(df, ["id"], threshold)
+    if function == "drop_large_groups":
+        return lambda df: implementation.drop_large_groups(df, ["id"], threshold)
+    if function == "limit_keys_per_group":
+        return lambda df: implementation.limit_keys_per_group(
+            df, ["id"], ["key"], threshold
+        )
+    raise ValueError(f"Unknown truncation function {function}")
+
+
 def pandas_runner(function: str, threshold: int) -> Callable[[pd.DataFrame], None]:
     """Returns a callable running one pandas truncation function.
 
@@ -126,13 +151,7 @@ def pandas_runner(function: str, threshold: int) -> Callable[[pd.DataFrame], Non
     Returns:
         A callable taking the input frame.
     """
-    if function == "truncate_large_groups":
-        return lambda df: pandas_truncation.truncate_large_groups(df, ["id"], threshold)
-    if function == "drop_large_groups":
-        return lambda df: pandas_truncation.drop_large_groups(df, ["id"], threshold)
-    return lambda df: pandas_truncation.limit_keys_per_group(
-        df, ["id"], ["key"], threshold
-    )
+    return make_runner(pandas_truncation, function, threshold)
 
 
 def spark_prepare(spark: Any, df: pd.DataFrame) -> Any:
@@ -168,15 +187,8 @@ def spark_runner(function: str, threshold: int) -> Callable[[Any], Any]:
     """
     from tmlt.core.utils import truncation  # noqa: PLC0415
 
-    if function == "truncate_large_groups":
-        return lambda sdf: truncation.truncate_large_groups(
-            sdf, ["id"], threshold
-        ).count()
-    if function == "drop_large_groups":
-        return lambda sdf: truncation.drop_large_groups(sdf, ["id"], threshold).count()
-    return lambda sdf: truncation.limit_keys_per_group(
-        sdf, ["id"], ["key"], threshold
-    ).count()
+    run = make_runner(truncation, function, threshold)
+    return lambda sdf: run(sdf).count()
 
 
 def build_spark() -> Any:

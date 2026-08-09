@@ -28,14 +28,25 @@ def get_nonconflicting_string(strs: List[str]) -> str:
 
 def print_sdf(sdf: DataFrame) -> None:
     """Prints a spark dataframe in a deterministic way."""
-    df = sdf.toPandas()
-    # TODO(#2107): Fix typing here
-    print(df.sort_values(list(df.columns), ignore_index=True))  # type: ignore
+    print_pandas(sdf.toPandas())
 
 
 def print_pandas(df: pd.DataFrame) -> None:
     """Prints a pandas dataframe in a deterministic way."""
-    print(df.sort_values(list(df.columns), ignore_index=True))
+    try:
+        print(df.sort_values(list(df.columns), ignore_index=True))
+    except TypeError:
+        # An object column mixing incomparable types -- which the truncation
+        # utilities in tmlt.core.utils.pandas_truncation accept -- has no
+        # natural sort; fall back to a deterministic order on the type name
+        # and repr of every value.
+        order = sorted(
+            range(len(df)),
+            key=lambda position: [
+                f"{type(value).__name__}:{value!r}" for value in df.iloc[position]
+            ],
+        )
+        print(df.iloc[order].reset_index(drop=True))
 
 
 T = TypeVar("T")

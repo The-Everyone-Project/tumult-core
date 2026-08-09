@@ -26,12 +26,13 @@ The digest-level agreement of the two implementations is checked by
 # Copyright Tumult Labs 2026
 
 import itertools
-import math
 from collections import Counter
 from test.unit.utils.truncation_testing import (
     TruncationBackend,
+    apply_truncation,
     make_pandas_backend,
     make_spark_backend,
+    normalized_rows,
 )
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -40,11 +41,6 @@ import pandas as pd
 import pytest
 
 from tmlt.core.utils.testing import Case, assert_dataframe_equal, parametrize
-
-# Stand-ins for values that are not usable as dictionary keys, or that must not
-# be conflated with each other.
-_NULL = "\x00tmlt-null"
-_NAN = "\x00tmlt-nan"
 
 
 @pytest.fixture(params=["spark", "pandas"])
@@ -89,39 +85,16 @@ def _frame(columns: Sequence[str], rows: Sequence[Tuple[Any, ...]]) -> pd.DataFr
     return pd.DataFrame(data, columns=list(columns))
 
 
-def _normalize(value: Any) -> Any:
-    """Returns a hashable, backend-independent stand-in for a cell value.
-
-    Nulls of every flavor collapse onto one sentinel and NaN onto another, so
-    that the two are never confused, and numbers are compared by value rather
-    than by type, because a Spark round trip can widen an integer column.
-
-    Args:
-        value: The value to normalize.
-
-    Returns:
-        A hashable stand-in for the value.
-    """
-    if value is None or value is pd.NA or value is pd.NaT:
-        return _NULL
-    if isinstance(value, (float, np.floating)):
-        as_float = float(value)
-        if math.isnan(as_float):
-            return _NAN
-        if as_float.is_integer() and abs(as_float) < 2.0**63:
-            return int(as_float)
-        return as_float
-    if isinstance(value, (int, np.integer)):
-        return int(value)
-    if isinstance(value, np.str_):
-        return str(value)
-    return value
-
-
 def _rows(
     df: pd.DataFrame, columns: Optional[Sequence[str]] = None
 ) -> List[Tuple[Any, ...]]:
     """Returns the given columns of a dataframe as normalized row tuples.
+
+    The values are normalized by
+    :func:`~test.unit.utils.truncation_testing.normalize_value`, so that nulls
+    of every flavor collapse onto one sentinel, NaN onto another, and numbers
+    are compared by value rather than by type -- a Spark round trip can widen
+    an integer column.
 
     Args:
         df: The dataframe to read.
@@ -135,10 +108,7 @@ def _rows(
     names = [str(name) for name in (df.columns if columns is None else columns)]
     if not names:
         return [()] * len(df)
-    if not len(df):
-        return []
-    values = [[_normalize(value) for value in df[name]] for name in names]
-    return [tuple(row) for row in zip(*values)]
+    return normalized_rows(df, names)
 
 
 def _group_sizes(df: pd.DataFrame, grouping: Sequence[str]) -> Dict[Any, int]:
@@ -255,24 +225,6 @@ def _assert_key_limited(
     assert Counter(_rows(actual, list(original.columns))) == expected_rows, (
         "The rows of a surviving key were not all kept."
     )
-
-
-def _apply(
-    backend: TruncationBackend,
-    function: str,
-    df: pd.DataFrame,
-    grouping: Sequence[str],
-    keys: Sequence[str],
-    threshold: int,
-) -> pd.DataFrame:
-    """Calls one of a backend's three functions by name."""
-    if function == "truncate_large_groups":
-        return backend.truncate_large_groups(df, grouping, threshold)
-    if function == "drop_large_groups":
-        return backend.drop_large_groups(df, grouping, threshold)
-    if function == "limit_keys_per_group":
-        return backend.limit_keys_per_group(df, grouping, keys, threshold)
-    raise ValueError(f"Unknown function {function}")
 
 
 _ALL_FUNCTIONS = (
@@ -440,7 +392,7 @@ def test_nonpositive_threshold_keeps_nothing(
         ["A", "B"],
         [("g1", "k1"), ("g1", "k2"), ("g2", "k1"), ("g2", "k1")],
     )
-    actual = _apply(backend, function, df, ["A"], ["B"], threshold)
+    actual = apply_truncation(backend, function, df, ["A"], ["B"], threshold)
     assert len(actual) == 0
     assert list(actual.columns) == ["A", "B"]
 
@@ -454,7 +406,7 @@ def test_huge_threshold_keeps_everything(
         ["A", "B"],
         [("g1", "k1"), ("g1", "k2"), ("g2", "k1"), ("g2", "k1")],
     )
-    actual = _apply(backend, function, df, ["A"], ["B"], 10**9)
+    actual = apply_truncation(backend, function, df, ["A"], ["B"], 10**9)
     assert_dataframe_equal(actual, df)
 
 

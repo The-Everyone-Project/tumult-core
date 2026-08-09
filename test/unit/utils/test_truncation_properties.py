@@ -51,6 +51,7 @@ from test.unit.utils.truncation_testing import (
     SIMPLE_DTYPE_MENU,
     EdgeCase,
     TruncationBackend,
+    apply_truncation,
     grouped_symdiff_distance,
     make_pandas_backend,
     make_spark_backend,
@@ -233,19 +234,9 @@ def _run(
     """
     key = (backend_.name, function, case.id, case.rows, threshold)
     if key not in _OUTPUTS:
-        df = case.to_pandas()
-        grouping = list(case.grouping)
-        if function == "truncate_large_groups":
-            output = backend_.truncate_large_groups(df, grouping, threshold)
-        elif function == "drop_large_groups":
-            output = backend_.drop_large_groups(df, grouping, threshold)
-        elif function == "limit_keys_per_group":
-            output = backend_.limit_keys_per_group(
-                df, grouping, list(case.keys), threshold
-            )
-        else:
-            raise ValueError(f"Unknown truncation function {function}")
-        _OUTPUTS[key] = output
+        _OUTPUTS[key] = apply_truncation(
+            backend_, function, case.to_pandas(), case.grouping, case.keys, threshold
+        )
     return _OUTPUTS[key]
 
 

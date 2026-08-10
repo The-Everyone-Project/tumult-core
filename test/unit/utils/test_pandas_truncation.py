@@ -41,11 +41,18 @@ Regenerating the golden vectors:
 import datetime
 import decimal
 import random
+import warnings
 from collections import Counter
 from test.unit.utils.truncation_testing import (
+    CJK,
     COLUMN_KINDS,
     EDGE_CASES,
+    EMOJI,
+    E_ACUTE,
+    E_COMBINING_ACUTE,
     EdgeCase,
+    is_null_value,
+    label_value,
     random_frame,
 )
 from typing import Any, Callable, List, Optional, Sequence, Tuple
@@ -66,6 +73,7 @@ from tmlt.core.utils.pandas_truncation import (
     _group_key,
     _hash_columns,
     _hash_value,
+    _is_null,
     _java_double_to_string,
     _java_float_to_string,
     _order_keys,
@@ -78,15 +86,6 @@ from tmlt.core.utils.pandas_truncation import (
     truncate_large_groups,
 )
 from tmlt.core.utils.testing import Case, assert_dataframe_equal, parametrize
-
-# Non-ASCII strings, written as escapes so that the source stays ASCII: a
-# precomposed e-acute, an ASCII e followed by a combining acute accent (which
-# renders identically but is a different string), three CJK characters, and an
-# emoji from outside the basic multilingual plane.
-_E_ACUTE = "\u00e9"
-_E_COMBINING_ACUTE = "e\u0301"
-_CJK = "\u65e5\u672c\u8a9e"
-_EMOJI = "\U0001f642"
 
 ################################################################################
 # Frozen golden vectors
@@ -284,22 +283,22 @@ HASH_VECTORS: Tuple[Tuple[str, Any, str], ...] = (
     ),
     (
         "string-precomposed-e-acute",
-        _E_ACUTE,
+        E_ACUTE,
         "4a99557e4033c3539de2eb65472017cad5f9557f7a0625a09f1c3f6e2ba69c4c",
     ),
     (
         "string-combining-e-acute",
-        _E_COMBINING_ACUTE,
+        E_COMBINING_ACUTE,
         "bf12767b0f2a56b2190075bae8169f656e3ce8d6357d4aff184bc6c7ea48f9f6",
     ),
     (
         "string-cjk",
-        _CJK,
+        CJK,
         "77710aedc74ecfa33685e33a6c7df5cc83004da1bdcef7fb280f5c2b2e97e0a5",
     ),
     (
         "string-emoji",
-        _EMOJI,
+        EMOJI,
         "d06f1525f791397809f9bc98682b5c13318eca4c3123433467fd4dffda44fd14",
     ),
     (
@@ -478,6 +477,38 @@ def test_hash_value_of_null_is_none(value: Any):
     assert _hash_value(value) is None
 
 
+@parametrize(
+    Case("none")(value=None),
+    Case("pandas-na")(value=pd.NA),
+    Case("pandas-nat")(value=pd.NaT),
+    Case("float-nan")(value=float("nan")),
+    Case("numpy-nan")(value=np.nan),
+    Case("numpy-float32-nan")(value=np.float32("nan")),
+    Case("numpy-float16-nan")(value=np.float16("nan")),
+    Case("numpy-datetime64-nat")(value=np.datetime64("NaT")),
+    Case("decimal-nan")(value=decimal.Decimal("NaN")),
+    Case("int-zero")(value=0),
+    Case("float-zero")(value=0.0),
+    Case("empty-string")(value=""),
+    Case("string")(value="x"),
+    Case("empty-bytes")(value=b""),
+    Case("false")(value=False),
+    Case("timestamp")(value=pd.Timestamp("2020-01-01")),
+    Case("date")(value=datetime.date(2020, 1, 1)),
+)
+def test_is_null_matches_the_harness_taxonomy(value: Any):
+    """The implementation's null taxonomy matches the test harness's oracle.
+
+    :func:`~test.unit.utils.truncation_testing.is_null_value` deliberately
+    re-states ``_is_null`` rather than importing it, so that the oracle of the
+    differential suite cannot drift in lockstep with a taxonomy bug here. If
+    this test fails, the implementation's null taxonomy changed, and every use
+    of ``is_null_value`` in the test harness must be consciously re-reviewed
+    against the new taxonomy -- not just re-synced to it.
+    """
+    assert _is_null(value) == is_null_value(value)
+
+
 def test_hash_value_of_string_and_bytes_agree():
     """Spark hashes strings and binary values as raw bytes, so both collide.
 
@@ -493,7 +524,7 @@ def test_hash_value_distinguishes_lookalike_values():
     """Values that are easily conflated hash differently."""
     assert _hash_value(0.0) != _hash_value(-0.0)
     assert _hash_value("") != _hash_value(None)
-    assert _hash_value(_E_ACUTE) != _hash_value(_E_COMBINING_ACUTE)
+    assert _hash_value(E_ACUTE) != _hash_value(E_COMBINING_ACUTE)
     assert _hash_value(1) != _hash_value(1.0)
     assert _hash_value(np.float32(1 / 3)) != _hash_value(1 / 3)
 
@@ -641,6 +672,43 @@ def test_java_double_to_string_prefers_java_19_rendering():
     assert _java_double_to_string(value) == "9.9E-324"
     assert float("9.9E-324") == value
     assert float("1.0E-323") == value
+
+
+@parametrize(
+    Case("low-precision")(prec=1, rounding=None, trap_floats=False),
+    Case("round-up")(prec=2, rounding=decimal.ROUND_UP, trap_floats=False),
+    Case("float-operation-trap")(prec=None, rounding=None, trap_floats=True),
+)
+def test_rendering_ignores_the_ambient_decimal_context(
+    prec: Optional[int], rounding: Optional[str], trap_floats: bool
+):
+    """A hostile caller-installed decimal context cannot change any digest.
+
+    ``Decimal.scaleb`` rounds at the active context's precision, and
+    ``Decimal(float)`` trips the ``FloatOperation`` trap when a caller has
+    set it -- and the trap case is not confined to subnormals: every value
+    whose shortest rendering has a single significant digit (``1.0``,
+    ``100.0``) reaches the two-digit path, so it is ordinary data that used
+    to raise. Under a low-precision context the smallest subnormals rendered
+    ``5.0E-324`` and ``1.0E-45`` instead of Java's ``4.9E-324`` and
+    ``1.4E-45``, silently changing digests -- and hence which rows survive,
+    the failure mode no error ever reports. Every rendering and every golden
+    digest must equal its default-context value whatever context the caller
+    installed.
+    """
+    with decimal.localcontext() as ctx:
+        if prec is not None:
+            ctx.prec = prec
+        if rounding is not None:
+            ctx.rounding = rounding
+        if trap_floats:
+            ctx.traps[decimal.FloatOperation] = True
+        for value, expected_rendering in _DOUBLE_RENDERINGS:
+            assert _java_double_to_string(value) == expected_rendering
+        for value, expected_rendering in _FLOAT_RENDERINGS:
+            assert _java_float_to_string(np.float32(value)) == expected_rendering
+        for _, value, expected_digest in HASH_VECTORS:
+            assert _hash_value(value) == expected_digest
 
 
 ################################################################################
@@ -812,8 +880,8 @@ def _dtype_matrix_frame() -> pd.DataFrame:
     values_by_kind: dict = {
         "int64": [1, -1, 9223372036854775807, 0],
         "Int64": [1, None, -9223372036854775808, 7],
-        "string": ["a", None, "a,", _E_ACUTE],
-        "string_dtype": ["", None, "b", _CJK],
+        "string": ["a", None, "a,", E_ACUTE],
+        "string_dtype": ["", None, "b", CJK],
         "float64": [0.0, -0.0, float("nan"), 5e-324],
         "Float64": [1.5, None, 0.001, -1.5],
         "object_float": [float("nan"), None, -0.0, 1e7],
@@ -1213,6 +1281,34 @@ def test_fast_path_matches_full_path():
     assert all(count > 0 for count in regimes.values()), regimes
 
 
+def test_fast_path_matches_full_path_with_no_hashed_columns():
+    """The paths also agree when the grouping and key columns are both empty.
+
+    With no columns to hash, the whole frame is one group holding one empty
+    key, so any positive threshold keeps every row and a non-positive one
+    keeps none. The refined classes must then be built from no code arrays
+    at all, which the corpus cases -- which always hash something -- never
+    exercise.
+    """
+    frames = [
+        pd.DataFrame({"a": [1, 2, 3, 4, 5]}),
+        pd.DataFrame(index=range(5)),
+        pd.DataFrame({"a": pd.Series([], dtype="int64")}),
+    ]
+    for df in frames:
+        for threshold in (0, 1, 2, 10**9):
+            fast_results = _run_all_three(df, [], [], threshold)
+            with pytest.MonkeyPatch.context() as patcher:
+                patcher.setattr(pandas_truncation, "_FAST_PATH_ENABLED", False)
+                full_results = _run_all_three(df, [], [], threshold)
+            for fast, full in zip(fast_results, full_results):
+                pd.testing.assert_frame_equal(fast, full)
+            expected = df if threshold >= 1 else df.iloc[:0].copy()
+            pd.testing.assert_frame_equal(
+                limit_keys_per_group(df, [], [], threshold), expected
+            )
+
+
 def test_fast_path_still_validates():
     """Unsupported columns raise even when nothing would be truncated.
 
@@ -1477,6 +1573,66 @@ def test_na_like_values_hidden_from_kind_inference_are_rejected(values: List[Any
     assert len(drop_large_groups(df, ["v"], 1)) == len(values)
 
 
+#: A string Spark cannot hold as-is: the unpaired surrogate has no UTF-8
+#: encoding, and Spark coerces it to U+FFFD at ingest (written as an escape
+#: so that the source stays ASCII).
+_SURROGATE_STRING = "\ud800bad"
+
+
+@parametrize(
+    Case("object-string-kind")(
+        column=pd.Series(["ok", _SURROGATE_STRING], dtype=object),
+        match="column c.*encoded as UTF-8",
+    ),
+    Case("string-dtype")(
+        column=pd.Series(["ok", _SURROGATE_STRING], dtype="string"),
+        match="column c.*encoded as UTF-8",
+    ),
+    Case("mixed-kind-value-scan")(
+        column=pd.Series([1, _SURROGATE_STRING], dtype=object),
+        match="encoded as UTF-8",
+    ),
+)
+def test_validate_column_rejects_unencodable_strings(column: pd.Series, match: str):
+    """A str holding an unpaired surrogate is rejected at validation.
+
+    Such strings pass the kind inference as ``string`` and enter string
+    dtype columns outright, but have no UTF-8 encoding to hash -- and Spark
+    coerces the surrogate to U+FFFD at ingest, so hashing (or grouping, or
+    ordering) the raw code points would silently keep different rows than
+    Spark. All three validation routes must reject them: the ``string``-kind
+    shortcut, the string dtypes, and the per-value fallback scan, where the
+    mixed column below lands and where the error carries no column name. The
+    error must be the module's :class:`NotImplementedError`, never a leaked
+    ``UnicodeEncodeError``.
+    """
+    with pytest.raises(NotImplementedError, match=match):
+        _validate_column(column, "c")
+    with pytest.raises(NotImplementedError, match="encoded as UTF-8"):
+        for value in _column_values(column):
+            _render_value(value)
+
+
+def test_surrogate_strings_raise_on_both_fast_and_full_paths():
+    """The fast and full paths agree that a surrogate string is an error.
+
+    Before validation rejected these strings, this frame was the one known
+    input where the two paths disagreed: the surrogate row's group is not
+    oversized, so the fast path never hashed it and returned normally, while
+    the full path hashed every row and raised. The rejection must therefore
+    come from validation, which both paths run before choosing which rows to
+    hash.
+    """
+    df = pd.DataFrame({"g": ["a", "b"], "s": ["ok", _SURROGATE_STRING]})
+    for fast_path_enabled in (True, False):
+        with pytest.MonkeyPatch.context() as patcher:
+            patcher.setattr(pandas_truncation, "_FAST_PATH_ENABLED", fast_path_enabled)
+            with pytest.raises(NotImplementedError, match="encoded as UTF-8"):
+                truncate_large_groups(df, ["g"], 1)
+            with pytest.raises(NotImplementedError, match="encoded as UTF-8"):
+                limit_keys_per_group(df, ["g"], ["s"], 1)
+
+
 def test_empty_object_column_cannot_be_validated():
     """An empty object column is accepted, even though Spark would know better.
 
@@ -1538,6 +1694,52 @@ def test_drop_large_groups_never_rejects_a_column(
     df = pd.DataFrame({"g": ["a", "a", "b"], column: values})
     result = drop_large_groups(df, list(grouping), 3)
     assert len(result) == 3
+
+
+def test_drop_large_groups_rejects_unhashable_object_values():
+    """A value with no Python hash raises NotImplementedError, not TypeError.
+
+    No *dtype* makes ``drop_large_groups`` raise, but grouping needs every
+    value's group key to be hashable, and ``pd.factorize`` over a key
+    holding a ``dict`` surfaced a bare ``TypeError`` from inside pandas.
+    Spark cannot hold such values either, so they are reported as the
+    unsupported values they are, in the same form ``_render_value`` uses. A
+    ``bytearray`` -- equally unhashable -- must keep working: it is keyed by
+    its bytes before the hashability probe.
+    """
+    df = pd.DataFrame(
+        {
+            "g": pd.Series([{"a": 1}, {"a": 1}, [1, 2]], dtype=object),
+            "p": [1, 2, 3],
+        }
+    )
+    with pytest.raises(NotImplementedError, match="Unsupported data type dict"):
+        drop_large_groups(df, ["g"], 1)
+    bytearrays = pd.DataFrame({"b": pd.Series([bytearray(b"x")], dtype=object)})
+    assert len(drop_large_groups(bytearrays, ["b"], 1)) == 1
+
+
+@parametrize(
+    Case("negative")(threshold=-1),
+    Case("zero")(threshold=0),
+    Case("positive")(threshold=2),
+)
+def test_unknown_columns_raise_key_error_at_any_threshold(threshold: int):
+    """An unknown column raises KeyError from all three functions, at any threshold.
+
+    A non-positive threshold returns an empty frame without hashing anything,
+    so the column lookups have to happen before that early return: an unknown
+    column is an error whatever the threshold is.
+    """
+    df = pd.DataFrame({"g": ["a", "a", "b"], "k": ["x", "y", "x"]})
+    with pytest.raises(KeyError, match="missing"):
+        truncate_large_groups(df, ["missing"], threshold)
+    with pytest.raises(KeyError, match="missing"):
+        drop_large_groups(df, ["missing"], threshold)
+    with pytest.raises(KeyError, match="missing"):
+        limit_keys_per_group(df, ["missing"], ["k"], threshold)
+    with pytest.raises(KeyError, match="missing"):
+        limit_keys_per_group(df, ["g"], ["missing"], threshold)
 
 
 ################################################################################
@@ -1739,15 +1941,7 @@ _NAN_AND_NULL_FRAME = pd.DataFrame(
 
 def _value_labels(column: pd.Series) -> Tuple[str, ...]:
     """Returns a sorted label per value, telling NaN and null apart."""
-    labels = []
-    for value in column:
-        if value is None or value is pd.NA:
-            labels.append("null")
-        elif isinstance(value, float) and np.isnan(value):
-            labels.append("nan")
-        else:
-            labels.append(repr(value))
-    return tuple(sorted(labels))
+    return tuple(sorted(label_value(value) for value in column))
 
 
 @parametrize(
@@ -1905,6 +2099,52 @@ def test_nanoseconds_do_not_split_a_group(threshold: int, expected: int):
     )
     assert len(set(_hash_columns(df, ["t"]))) == 1
     assert len(drop_large_groups(df, ["t"], threshold)) == expected
+
+
+def test_nanosecond_timestamps_at_the_bounds_get_group_keys():
+    """A Timestamp within a microsecond of the type's bounds still has a key.
+
+    Flooring with ``Timestamp.floor("us")`` constructs another Timestamp,
+    and for values like ``pd.Timestamp.min`` the floored instant lies below
+    the nanosecond bound, so building the key raised ``OverflowError`` --
+    crashing all three public functions on an object column that merely
+    holds the value, ``drop_large_groups`` included, even though the value
+    renders fine. The key must also equal, and hash like, the key of an
+    equal ``datetime.datetime``: an object column can mix the two, and
+    their partitions must unify.
+    """
+    floored_min = datetime.datetime(1677, 9, 21, 0, 12, 43, 145224)
+    with warnings.catch_warnings():
+        # Discarding the nanoseconds is the point of the key; a warning
+        # about it would leak once per value on the fallback paths.
+        warnings.simplefilter("error")
+        key = _group_key(pd.Timestamp.min)
+        assert key == _group_key(floored_min)
+        assert hash(key) == hash(_group_key(floored_min))
+        assert _group_key(pd.Timestamp.max) == _group_key(
+            datetime.datetime(2262, 4, 11, 23, 47, 16, 854775)
+        )
+    # The floor still goes toward negative infinity for pre-epoch values.
+    assert _group_key(pd.Timestamp("1969-12-31 23:59:59.999999999")) == _group_key(
+        datetime.datetime(1969, 12, 31, 23, 59, 59, 999999)
+    )
+    df = pd.DataFrame(
+        {
+            "g": ["a", "a", "b"],
+            "t": pd.Series([pd.Timestamp.min] * 3, dtype=object),
+        }
+    )
+    assert len(truncate_large_groups(df, ["g"], 1)) == 2
+    assert len(limit_keys_per_group(df, ["g"], ["t"], 1)) == 3
+    # The three values are one group: kept whole at threshold 3, dropped
+    # whole at threshold 2.
+    assert len(drop_large_groups(df, ["t"], 3)) == 3
+    assert len(drop_large_groups(df, ["t"], 2)) == 0
+    # A Timestamp and a datetime at the same microsecond are one partition.
+    mixed = pd.DataFrame(
+        {"t": pd.Series([pd.Timestamp.min, floored_min], dtype=object), "v": [1, 2]}
+    )
+    assert drop_large_groups(mixed, ["t"], 1).empty
 
 
 @pytest.mark.skipif(

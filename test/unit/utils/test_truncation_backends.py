@@ -6,12 +6,12 @@ runs twice: once against the Spark implementations in
 in :mod:`~tmlt.core.utils.pandas_truncation`. The Spark session is only
 requested by the Spark parameter, so the pandas runs never start a JVM.
 
-The behavioral cases of :mod:`test.unit.utils.test_truncation` are re-expressed
-here (that module is left untouched, so the Spark implementations keep their
-original coverage), together with the cases that only exist because there are
-now two implementations to agree: an empty collection of grouping columns,
-several grouping or key columns, nulls in grouping and key columns, and
-thresholds outside the interesting range.
+The behavioral cases that used to live in
+:mod:`test.unit.utils.test_truncation` are re-expressed here (that module now
+keeps only its Spark-specific tests), together with the cases that only exist
+because there are now two implementations to agree: an empty collection of
+grouping columns, several grouping or key columns, nulls in grouping and key
+columns, and thresholds outside the interesting range.
 
 Which rows survive truncation depends on SHA-256 digests, so the assertions
 here are the ones that do not: exact results where the hashes cannot matter
@@ -28,30 +28,17 @@ The digest-level agreement of the two implementations is checked by
 import itertools
 from collections import Counter
 from test.unit.utils.truncation_testing import (
+    TRUNCATION_FUNCTIONS,
     TruncationBackend,
     apply_truncation,
-    make_pandas_backend,
-    make_spark_backend,
     normalized_rows,
 )
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from tmlt.core.utils.testing import Case, assert_dataframe_equal, parametrize
-
-
-@pytest.fixture(params=["spark", "pandas"])
-def backend(request: pytest.FixtureRequest) -> TruncationBackend:
-    """Returns each of the two truncation implementations in turn."""
-    if request.param == "spark":
-        # The Spark session is requested here rather than as a fixture
-        # parameter, so that the pandas runs of every test need no JVM.
-        return make_spark_backend(request.getfixturevalue("spark"))
-    return make_pandas_backend()
-
 
 ################################################################################
 # Helpers
@@ -227,10 +214,8 @@ def _assert_key_limited(
     )
 
 
-_ALL_FUNCTIONS = (
-    Case("truncate_large_groups")(function="truncate_large_groups"),
-    Case("drop_large_groups")(function="drop_large_groups"),
-    Case("limit_keys_per_group")(function="limit_keys_per_group"),
+_ALL_FUNCTIONS = tuple(
+    Case(function)(function=function) for function in TRUNCATION_FUNCTIONS
 )
 
 
@@ -465,6 +450,22 @@ def test_limit_keys_empty_grouping_columns(
     df = _frame(["A", "B"], _UNGROUPED_ROWS)
     actual = backend.limit_keys_per_group(df, [], ["B"], threshold)
     _assert_key_limited(actual, df, [], ["B"], threshold)
+
+
+@parametrize(
+    Case("keeps-nothing")(threshold=0),
+    Case("keeps-everything")(threshold=1),
+    Case("keeps-everything-with-room")(threshold=10**9),
+)
+def test_limit_keys_empty_grouping_and_key_columns(
+    backend: TruncationBackend, threshold: int
+) -> None:
+    """Tests that with no grouping or key columns the frame is one group, one key."""
+    df = _frame(["A", "B"], _UNGROUPED_ROWS)
+    actual = backend.limit_keys_per_group(df, [], [], threshold)
+    if threshold >= 1:
+        assert_dataframe_equal(actual, df)
+    _assert_key_limited(actual, df, [], [], threshold)
 
 
 ################################################################################

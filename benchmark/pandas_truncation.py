@@ -71,20 +71,20 @@ def make_frame(distribution: str, n_rows: int) -> pd.DataFrame:
     rng = np.random.default_rng(SEED)
     if distribution in ("adversarial", "all-under"):
         ids = rng.integers(0, max(n_rows // 10, 1), size=n_rows, dtype=np.int64)
+        n_keys = 50
     elif distribution == "realistic":
         sizes = 1 + rng.geometric(p=0.4, size=n_rows)
         ids = np.repeat(np.arange(len(sizes), dtype=np.int64), sizes.astype(np.int64))[
             :n_rows
         ]
+        n_keys = 50
     elif distribution == "wide-pairs":
         n_ids = max(n_rows // 20, 1)
         ids = rng.integers(0, n_ids, size=n_rows, dtype=np.int64)
+        n_keys = 5
     else:
         raise ValueError(f"Unknown distribution {distribution}")
-    if distribution == "wide-pairs":
-        keys = rng.integers(0, 5, size=n_rows, dtype=np.int64)
-    else:
-        keys = rng.integers(0, 50, size=n_rows, dtype=np.int64)
+    keys = rng.integers(0, n_keys, size=n_rows, dtype=np.int64)
     strings = pd.Series(
         [f"v{i}" for i in rng.integers(0, 1000, size=n_rows)], dtype=object
     )
@@ -119,8 +119,8 @@ def oversized_fraction(df: pd.DataFrame, function: str, threshold: int) -> float
 def make_runner(implementation: Any, function: str, threshold: int) -> Callable:
     """Returns a callable running one truncation function of an implementation.
 
-    This is the single dispatch point over the benchmarked function names; the
-    per-backend runners below only add their backend's plumbing.
+    This is the single dispatch point over the benchmarked function names;
+    :func:`spark_runner` below only adds Spark's plumbing.
 
     Args:
         implementation: The module carrying the three truncation functions.
@@ -139,19 +139,6 @@ def make_runner(implementation: Any, function: str, threshold: int) -> Callable:
             df, ["id"], ["key"], threshold
         )
     raise ValueError(f"Unknown truncation function {function}")
-
-
-def pandas_runner(function: str, threshold: int) -> Callable[[pd.DataFrame], None]:
-    """Returns a callable running one pandas truncation function.
-
-    Args:
-        function: The function to run.
-        threshold: The truncation threshold.
-
-    Returns:
-        A callable taking the input frame.
-    """
-    return make_runner(pandas_truncation, function, threshold)
 
 
 def spark_prepare(spark: Any, df: pd.DataFrame) -> Any:
@@ -332,29 +319,26 @@ def main() -> None:
                     "threshold": threshold,
                     "oversized": round(oversized, 4),
                 }
-                if "pandas" in backends:
-                    run = pandas_runner(function, threshold)
-                    seconds = best_of(lambda: run(df), args.repeats)
-                    record[f"pandas{suffix} (s)"] = round(seconds, 4)
+                for backend in backends:
+                    if backend == "spark":
+                        if sdf is None:
+                            sdf = spark_prepare(spark, df)
+                        run = spark_runner(function, threshold)
+                        data = sdf
+                    else:
+                        run = make_runner(pandas_truncation, function, threshold)
+                        data = df
+                    seconds = best_of(lambda: run(data), args.repeats)
+                    record[f"{backend}{suffix} (s)"] = round(seconds, 4)
                     print(
-                        f"pandas {function} {distribution} rows={size} "
+                        f"{backend} {function} {distribution} rows={size} "
                         f"oversized={oversized:.1%} best={seconds:.4f}s"
                     )
-                    if args.profile and size == max(args.sizes):
+                    if backend == "pandas" and args.profile and size == max(args.sizes):
                         profile_call(
-                            lambda: run(df),
+                            lambda: run(data),
                             f"{function} {distribution} rows={size}",
                         )
-                if spark is not None:
-                    if sdf is None:
-                        sdf = spark_prepare(spark, df)
-                    run_spark = spark_runner(function, threshold)
-                    seconds = best_of(lambda: run_spark(sdf), args.repeats)
-                    record[f"spark{suffix} (s)"] = round(seconds, 4)
-                    print(
-                        f"spark {function} {distribution} rows={size} "
-                        f"oversized={oversized:.1%} best={seconds:.4f}s"
-                    )
                 rows.append(record)
             if sdf is not None:
                 sdf.unpersist()

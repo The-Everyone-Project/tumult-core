@@ -40,10 +40,11 @@ def print_pandas(df: pd.DataFrame) -> None:
         # utilities in tmlt.core.utils.pandas_truncation accept -- has no
         # natural sort; fall back to a deterministic order on the type name
         # and repr of every value.
+        rows = list(df.itertuples(index=False, name=None))
         order = sorted(
             range(len(df)),
             key=lambda position: [
-                f"{type(value).__name__}:{value!r}" for value in df.iloc[position]
+                f"{type(value).__name__}:{value!r}" for value in rows[position]
             ],
         )
         print(df.iloc[order].reset_index(drop=True))

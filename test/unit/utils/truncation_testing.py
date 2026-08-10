@@ -82,16 +82,25 @@ from pyspark.sql.types import (
 from tmlt.core.utils import pandas_truncation, truncation
 
 __all__ = [
+    "CJK",
     "COLUMN_KINDS",
     "DEFAULT_DTYPE_MENU",
     "EDGE_CASES",
     "EDGE_CASES_BY_ID",
+    "EMOJI",
+    "E_ACUTE",
+    "E_COMBINING_ACUTE",
     "ROW_ID_COLUMN",
     "SIMPLE_DTYPE_MENU",
+    "TRUNCATION_FUNCTIONS",
     "EdgeCase",
     "TruncationBackend",
     "apply_truncation",
+    "assert_no_conflating_values",
+    "frame_row_ids",
     "grouped_symdiff_distance",
+    "is_null_value",
+    "label_value",
     "make_pandas_backend",
     "make_spark_backend",
     "multiset_symdiff",
@@ -110,6 +119,19 @@ __all__ = [
 # row_ids sidesteps the NULL/NaN conflation that toPandas() introduces.
 ROW_ID_COLUMN = "row_id"
 
+
+def frame_row_ids(df: pd.DataFrame) -> List[int]:
+    """Returns the row ids of a dataframe, in its row order.
+
+    Args:
+        df: A frame carrying a :data:`ROW_ID_COLUMN` column.
+
+    Returns:
+        One int per row.
+    """
+    return [int(value) for value in df[ROW_ID_COLUMN]]
+
+
 _UTC = datetime.timezone.utc
 
 _SESSION_TIMEZONE_KEY = "spark.sql.session.timeZone"
@@ -118,6 +140,31 @@ _SESSION_TIMEZONE_KEY = "spark.sql.session.timeZone"
 _UTC_TIMEZONES = frozenset(
     {"UTC", "Etc/UTC", "Etc/GMT", "GMT", "UCT", "Universal", "Z", "Zulu", "+00:00"}
 )
+
+
+################################################################################
+# Null taxonomy
+################################################################################
+
+
+def is_null_value(value: Any) -> bool:
+    """Returns whether a value is a null value, as opposed to a float NaN.
+
+    This deliberately re-states the null taxonomy of
+    :func:`tmlt.core.utils.pandas_truncation._is_null` rather than importing
+    it: this module is the oracle the implementation is judged against, so a
+    taxonomy regression in the code under test must surface as a test failure
+    here instead of silently moving the oracle in lockstep with the bug.
+    ``test_pandas_truncation.test_is_null_matches_the_harness_taxonomy`` pins
+    the two functions against each other over a canonical corpus of values.
+
+    Args:
+        value: The value to classify.
+
+    Returns:
+        Whether the value is a null.
+    """
+    return value is None or value is pd.NA or value is pd.NaT
 
 
 ################################################################################
@@ -183,7 +230,7 @@ def _to_spark_value(value: Any) -> Any:
     Returns:
         The corresponding Python object.
     """
-    if value is None or value is pd.NA or value is pd.NaT:
+    if is_null_value(value):
         return None
     if isinstance(value, np.datetime64):
         value = pd.Timestamp(value)
@@ -225,7 +272,7 @@ def python_rows_from_pandas(df: pd.DataFrame) -> List[Tuple[Any, ...]]:
 def _spark_type_for_object_column(series: pd.Series, name: str) -> DataType:
     """Returns the Spark type matching the values of an object-dtype column."""
     for value in series:
-        if value is None or value is pd.NA or value is pd.NaT:
+        if is_null_value(value):
             continue
         if isinstance(value, str):
             return StringType()
@@ -348,6 +395,19 @@ class TruncationBackend:
     truncate_large_groups: Callable[..., pd.DataFrame]
     drop_large_groups: Callable[..., pd.DataFrame]
     limit_keys_per_group: Callable[..., pd.DataFrame]
+
+
+#: The names of the three truncation functions, as dispatched by
+#: :func:`apply_truncation`. Each name is defined in both
+#: :mod:`~tmlt.core.utils.truncation` and
+#: :mod:`~tmlt.core.utils.pandas_truncation`; the parity, differential, and
+#: property suites all parametrize over this one tuple, so adding or renaming
+#: a truncation function is one edit rather than one per module.
+TRUNCATION_FUNCTIONS: Tuple[str, ...] = (
+    "truncate_large_groups",
+    "drop_large_groups",
+    "limit_keys_per_group",
+)
 
 
 def apply_truncation(
@@ -611,10 +671,10 @@ _ROW_ID_FIELD = (ROW_ID_COLUMN, LongType(), "int64")
 # followed by a combining acute accent (which renders identically but is a
 # different string, and so must hash differently), three CJK characters, and an
 # emoji from outside the basic multilingual plane.
-_E_ACUTE = "\u00e9"
-_E_COMBINING_ACUTE = "e\u0301"
-_CJK = "\u65e5\u672c\u8a9e"
-_EMOJI = "\U0001f642"
+E_ACUTE = "\u00e9"
+E_COMBINING_ACUTE = "e\u0301"
+CJK = "\u65e5\u672c\u8a9e"
+EMOJI = "\U0001f642"
 
 EDGE_CASES: Tuple[EdgeCase, ...] = (
     _make_case(
@@ -680,9 +740,9 @@ EDGE_CASES: Tuple[EdgeCase, ...] = (
             (1, "a,", "b"),
             (2, "a", ",b"),
             (3, "a,b", ""),
-            (4, _E_ACUTE, _E_COMBINING_ACUTE),
-            (5, _E_COMBINING_ACUTE, _E_ACUTE),
-            (6, _CJK, _EMOJI),
+            (4, E_ACUTE, E_COMBINING_ACUTE),
+            (5, E_COMBINING_ACUTE, E_ACUTE),
+            (6, CJK, EMOJI),
             (7, "a", "b"),
             (8, "\t\n", " "),
         ],
@@ -1284,10 +1344,10 @@ _STRING_POOL: Tuple[str, ...] = (
     "a,b",
     " ",
     "\t",
-    _E_ACUTE,
-    _E_COMBINING_ACUTE,
-    _CJK,
-    _EMOJI,
+    E_ACUTE,
+    E_COMBINING_ACUTE,
+    CJK,
+    EMOJI,
     "0",
     "00",
     "1e3",
@@ -1642,7 +1702,7 @@ def normalize_value(value: Any) -> Any:
     Returns:
         A hashable stand-in for the value.
     """
-    if value is None or value is pd.NA or value is pd.NaT:
+    if is_null_value(value):
         return _NULL
     if isinstance(value, (bool, np.bool_)):
         return bool(value)
@@ -1664,6 +1724,61 @@ def normalize_value(value: Any) -> Any:
     if isinstance(value, pd.Timestamp):
         return value.to_pydatetime(warn=False)
     return value
+
+
+def assert_no_conflating_values(df: pd.DataFrame, columns: Sequence[str]) -> None:
+    """Asserts that no column mixes values :func:`normalize_value` conflates.
+
+    The oracle identity :func:`normalize_value` induces is deliberately
+    coarser than the key identity of ``limit_keys_per_group``, which counts
+    *digests*: the oracle compares numbers by value, so int ``1`` and float
+    ``1.0`` -- which render, and therefore hash, as ``"1"`` and ``"1.0"``,
+    two distinct keys -- collapse onto one oracle key, as do ``0.0`` and
+    ``-0.0``. A frame mixing such a pair within one key column would not
+    fail any test on its own; it would silently weaken every assertion built
+    on the oracle. Calling this guard on the frames an oracle reads turns
+    that generator assumption into a loud failure instead. Two exemptions
+    are deliberate: the null flavors, which contribute nothing to a digest
+    and so can never be two keys, and equal values whose *types* differ but
+    whose renderings do not (int ``1`` and ``np.int64(1)``, bytes and
+    bytearrays of the same content), which a stricter type-tagged identity
+    would wrongly split.
+
+    Args:
+        df: The frame to check.
+        columns: The columns whose values feed an oracle's key identity.
+    """
+    for name in columns:
+        merged: Dict[Any, List[Any]] = {}
+        for value in df[name]:
+            if not is_null_value(value):
+                merged.setdefault(normalize_value(value), []).append(value)
+        for values in merged.values():
+            int_typed = [
+                value
+                for value in values
+                if isinstance(value, (int, np.integer))
+                and not isinstance(value, (bool, np.bool_))
+            ]
+            float_or_bool_typed = [
+                value
+                for value in values
+                if isinstance(value, (float, np.floating, bool, np.bool_))
+            ]
+            assert not (int_typed and float_or_bool_typed), (
+                f"Column {name} mixes {int_typed[0]!r} with "
+                f"{float_or_bool_typed[0]!r}: normalize_value merges them, but "
+                "they render differently and so are distinct keys."
+            )
+            zero_signs = {
+                math.copysign(1.0, float(value))
+                for value in values
+                if isinstance(value, (float, np.floating)) and float(value) == 0.0
+            }
+            assert len(zero_signs) <= 1, (
+                f"Column {name} mixes 0.0 and -0.0: normalize_value merges "
+                "them, but they hash differently and so are distinct keys."
+            )
 
 
 def normalized_rows(df: pd.DataFrame, columns: Sequence[str]) -> List[Tuple[Any, ...]]:
@@ -1748,3 +1863,28 @@ def grouped_symdiff_distance(
     pairs_a = _group_pairs(a, columns, list(group_cols))
     pairs_b = _group_pairs(b, columns, list(group_cols))
     return len(pairs_a ^ pairs_b)
+
+
+################################################################################
+# Value labels
+################################################################################
+
+
+def label_value(value: Any) -> str:
+    """Returns a string label for a cell value, keeping NaN and null apart.
+
+    ``None`` and ``pd.NA`` are labelled ``"null"``, and a float NaN ``"nan"``;
+    any other value -- ``pd.NaT`` included, deliberately, unlike the null
+    taxonomy of :func:`normalize_value` -- is labelled with its ``repr``.
+
+    Args:
+        value: The value to label.
+
+    Returns:
+        The value's label.
+    """
+    if value is None or value is pd.NA:
+        return "null"
+    if isinstance(value, float) and math.isnan(value):
+        return "nan"
+    return repr(value)

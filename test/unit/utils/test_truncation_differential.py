@@ -40,10 +40,12 @@ from test.unit.utils.truncation_testing import (
     DEFAULT_DTYPE_MENU,
     EDGE_CASES,
     EDGE_CASES_BY_ID,
-    ROW_ID_COLUMN,
     SIMPLE_DTYPE_MENU,
+    TRUNCATION_FUNCTIONS,
     EdgeCase,
     apply_truncation,
+    frame_row_ids,
+    label_value,
     random_frame,
     spark_df_from_case,
     utc_session_timezone,
@@ -72,15 +74,6 @@ from tmlt.core.utils.pandas_truncation import (
     _java_float_to_string,
 )
 from tmlt.core.utils.testing import Case, assert_dataframe_equal, parametrize
-
-#: The truncation functions, by name. Each name is defined in both
-#: :mod:`~tmlt.core.utils.truncation` and
-#: :mod:`~tmlt.core.utils.pandas_truncation`.
-FUNCTIONS: Tuple[str, ...] = (
-    "truncate_large_groups",
-    "drop_large_groups",
-    "limit_keys_per_group",
-)
 
 #: Seed for the small randomized sweep.
 SMALL_SWEEP_SEED = 20260809
@@ -232,7 +225,7 @@ def _pandas_result(case: EdgeCase, function: str, threshold: int) -> pd.DataFram
 
 def _survivor_row_ids(df: pd.DataFrame) -> Set[int]:
     """Returns the set of row ids in a result frame."""
-    return {int(value) for value in df[ROW_ID_COLUMN]}
+    return set(frame_row_ids(df))
 
 
 def _assert_agrees(
@@ -294,34 +287,15 @@ def _corpus_cases() -> List[Case]:
     ]
 
 
+@parametrize(Case(function)(function=function) for function in TRUNCATION_FUNCTIONS)
 @parametrize(*_corpus_cases())
-def test_truncate_large_groups_matches_spark(
-    utc_spark: SparkSession, case_id: str, threshold: int
+def test_truncation_matches_spark(
+    utc_spark: SparkSession, function: str, case_id: str, threshold: int
 ) -> None:
-    """``truncate_large_groups`` keeps the rows the Spark version keeps."""
+    """Each truncation function keeps the rows its Spark version keeps."""
     case = EDGE_CASES_BY_ID[case_id]
     sdf = spark_df_from_case(utc_spark, case)
-    _assert_agrees(sdf, case, "truncate_large_groups", threshold)
-
-
-@parametrize(*_corpus_cases())
-def test_drop_large_groups_matches_spark(
-    utc_spark: SparkSession, case_id: str, threshold: int
-) -> None:
-    """``drop_large_groups`` keeps the rows the Spark version keeps."""
-    case = EDGE_CASES_BY_ID[case_id]
-    sdf = spark_df_from_case(utc_spark, case)
-    _assert_agrees(sdf, case, "drop_large_groups", threshold)
-
-
-@parametrize(*_corpus_cases())
-def test_limit_keys_per_group_matches_spark(
-    utc_spark: SparkSession, case_id: str, threshold: int
-) -> None:
-    """``limit_keys_per_group`` keeps the rows the Spark version keeps."""
-    case = EDGE_CASES_BY_ID[case_id]
-    sdf = spark_df_from_case(utc_spark, case)
-    _assert_agrees(sdf, case, "limit_keys_per_group", threshold)
+    _assert_agrees(sdf, case, function, threshold)
 
 
 ################################################################################
@@ -460,7 +434,7 @@ def _run_sweep(spark: SparkSession, seed: int, frames: int) -> None:
         case = _sweep_frame(index, random.Random(seed + index))
         sdf = spark_df_from_case(spark, case)
         threshold = thresholds[index % len(thresholds)]
-        for function in FUNCTIONS:
+        for function in TRUNCATION_FUNCTIONS:
             _assert_agrees(sdf, case, function, threshold)
 
 
@@ -536,15 +510,6 @@ def _threshold_cases(thresholds: Sequence[int]) -> List[Case]:
     ]
 
 
-def _label(value: Any) -> str:
-    """Returns a label for a cell value, keeping NaN and null apart."""
-    if value is None or value is pd.NA:
-        return "null"
-    if isinstance(value, float) and math.isnan(value):
-        return "nan"
-    return repr(value)
-
-
 def _spark_row_labels(sdf: DataFrame) -> Tuple[Tuple[str, ...], ...]:
     """Returns the sorted labelled rows of a Spark frame.
 
@@ -560,7 +525,8 @@ def _spark_row_labels(sdf: DataFrame) -> Tuple[Tuple[str, ...], ...]:
     columns = sdf.columns
     return tuple(
         sorted(
-            tuple(_label(row[column]) for column in columns) for row in sdf.collect()
+            tuple(label_value(row[column]) for column in columns)
+            for row in sdf.collect()
         )
     )
 
@@ -576,7 +542,7 @@ def _pandas_row_labels(df: pd.DataFrame) -> Tuple[Tuple[str, ...], ...]:
     """
     return tuple(
         sorted(
-            tuple(_label(value) for value in row)
+            tuple(label_value(value) for value in row)
             for row in df.itertuples(index=False, name=None)
         )
     )
@@ -730,46 +696,49 @@ CURATED_FLOATS: Tuple[float, ...] = (
 )
 
 
-def _random_doubles(rng: random.Random, count: int) -> List[float]:
-    """Returns finite doubles drawn uniformly over 64-bit patterns.
+def _random_bit_pattern_floats(
+    rng: random.Random, count: int, float_code: str, int_code: str, bits: int
+) -> List[float]:
+    """Returns finite values drawn uniformly over a float type's bit patterns.
 
     Sampling bit patterns rather than decimal literals is what makes this a
-    worst case for the formatter: almost every value drawn this way needs 16 or
-    17 significant digits, which is exactly the population where Java's pre-19
-    ``Double.toString`` emits more digits than are needed.
+    worst case for the formatter: almost every value drawn this way needs all
+    of the type's significant digits (16 or 17 for a double), which is exactly
+    the population where Java's pre-19 ``toString`` emits more digits than are
+    needed.
 
     Args:
         rng: The seeded source of randomness.
         count: How many values to return.
+        float_code: The ``struct`` format code of the float type.
+        int_code: The ``struct`` format code of the same-width integer type.
+        bits: The width of the type, in bits.
 
     Returns:
         The sampled values.
     """
     values: List[float] = []
     while len(values) < count:
-        value = struct.unpack("<d", struct.pack("<Q", rng.getrandbits(64)))[0]
+        value = struct.unpack(float_code, struct.pack(int_code, rng.getrandbits(bits)))[
+            0
+        ]
         if math.isfinite(value):
             values.append(value)
     return values
+
+
+def _random_doubles(rng: random.Random, count: int) -> List[float]:
+    """Returns finite doubles drawn uniformly over 64-bit patterns."""
+    return _random_bit_pattern_floats(rng, count, "<d", "<Q", 64)
 
 
 def _random_floats(rng: random.Random, count: int) -> List[float]:
     """Returns finite float32 values drawn uniformly over 32-bit patterns.
 
-    Args:
-        rng: The seeded source of randomness.
-        count: How many values to return.
-
-    Returns:
-        The sampled values, as Python floats that are exactly representable in
-        float32.
+    The sampled values are Python floats that are exactly representable in
+    float32.
     """
-    values: List[float] = []
-    while len(values) < count:
-        value = struct.unpack("<f", struct.pack("<I", rng.getrandbits(32)))[0]
-        if math.isfinite(value):
-            values.append(value)
-    return values
+    return _random_bit_pattern_floats(rng, count, "<f", "<I", 32)
 
 
 def _spark_cast_strings(

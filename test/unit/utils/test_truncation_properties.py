@@ -41,7 +41,6 @@ stated over whole rows instead.
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Tumult Labs 2026
 
-import math
 import random
 from collections import Counter
 from dataclasses import replace
@@ -49,41 +48,21 @@ from functools import lru_cache
 from test.unit.utils.truncation_testing import (
     ROW_ID_COLUMN,
     SIMPLE_DTYPE_MENU,
+    TRUNCATION_FUNCTIONS,
     EdgeCase,
     TruncationBackend,
     apply_truncation,
+    assert_no_conflating_values,
+    frame_row_ids,
     grouped_symdiff_distance,
-    make_pandas_backend,
-    make_spark_backend,
     multiset_symdiff,
+    normalize_value,
     random_frame,
 )
 from typing import Any, Dict, List, Sequence, Set, Tuple
 
 import pandas as pd
 import pytest
-
-################################################################################
-# Backends
-################################################################################
-
-
-@pytest.fixture(params=["spark", "pandas"])
-def backend(request: pytest.FixtureRequest) -> TruncationBackend:
-    """Yields each truncation implementation in turn.
-
-    Args:
-        request: The pytest request, carrying the backend name.
-
-    Returns:
-        The backend to test.
-    """
-    if request.param == "spark":
-        # Fetched lazily so that the pandas parametrization does not pay for a
-        # Spark session it never uses.
-        return make_spark_backend(request.getfixturevalue("spark"))
-    return make_pandas_backend()
-
 
 ################################################################################
 # Frames
@@ -169,13 +148,6 @@ _THRESHOLDS: Tuple[int, ...] = (2, 5)
 #: extra row has a group cross the boundary.
 _DUPLICATE_THRESHOLDS: Tuple[int, ...] = (2, 10)
 
-#: The names of the three truncation functions, as understood by :func:`_run`.
-_FUNCTIONS: Tuple[str, ...] = (
-    "truncate_large_groups",
-    "drop_large_groups",
-    "limit_keys_per_group",
-)
-
 #: The ways a neighboring frame is derived from a frame. Removing a row from a
 #: group with other rows in it, duplicating a row, and editing a payload value
 #: all modify a single group (an input distance of 2); removing a whole group,
@@ -208,7 +180,16 @@ def _frame(shape: str, seed: int) -> EdgeCase:
         The generated case. Repeated calls return the same object.
     """
     arguments = _DUPLICATES_SHAPE if shape == _DUPLICATES_ID else _SHAPES[shape]
-    return random_frame(random.Random(seed), case_id=f"{shape}-{seed}", **arguments)
+    case = random_frame(random.Random(seed), case_id=f"{shape}-{seed}", **arguments)
+    # Every limit_keys_per_group oracle in this module reads key identity
+    # through normalize_value, which is coarser than the digest identity the
+    # implementations count keys by (see assert_no_conflating_values). Every
+    # frame the oracles read comes from here -- the neighbor and perturbed
+    # frames only reuse key values already in the base frame -- so this one
+    # guard makes a generator change that starts mixing conflating values
+    # fail loudly instead of silently weakening the oracle.
+    assert_no_conflating_values(case.to_pandas(), case.keys)
+    return case
 
 
 #: Outputs already computed, keyed by backend, function, frame, and threshold.
@@ -224,7 +205,8 @@ def _run(
 
     Args:
         backend_: The backend to run.
-        function: One of :data:`_FUNCTIONS`.
+        function: One of
+            :data:`~test.unit.utils.truncation_testing.TRUNCATION_FUNCTIONS`.
         case: The frame to truncate.
         threshold: The threshold to truncate with.
 
@@ -244,34 +226,19 @@ def _run(
 # Reading frames
 ################################################################################
 
-# Stands in for NaN, which is not equal to itself and so cannot be used as a
-# dictionary key directly.
-_NAN_KEY = "\x00tmlt-nan"
-
-
-def _cell(value: Any) -> Any:
-    """Returns a hashable stand-in for one value of an edge case's rows.
-
-    Note that this deliberately leaves 0.0 and -0.0 conflated, as Python does.
-    Telling them apart would matter in a grouping or key column, where Spark
-    counts them as two keys because their hashes differ, but the generator never
-    puts a negative zero in one.
-
-    Args:
-        value: A value taken from an :class:`EdgeCase`'s rows.
-
-    Returns:
-        A hashable stand-in for it.
-    """
-    if isinstance(value, float) and math.isnan(value):
-        return _NAN_KEY
-    if isinstance(value, (bytes, bytearray)):
-        return bytes(value)
-    return value
-
 
 def _tuples(case: EdgeCase, columns: Sequence[str]) -> List[Tuple[Any, ...]]:
     """Returns the given columns of a case's rows, as hashable tuples.
+
+    The values are made hashable by
+    :func:`~test.unit.utils.truncation_testing.normalize_value`, which stands
+    NaN in with a sentinel (NaN is not equal to itself, so it cannot be used
+    as a dictionary key directly). Note that 0.0 and -0.0 stay conflated, as
+    Python conflates them, and so do int 1 and float 1.0. Telling them apart
+    would matter in a key column, where Spark counts each pair as two keys
+    because their hashes differ, but the generator never mixes them in one;
+    :func:`_frame` checks that assumption with
+    :func:`~test.unit.utils.truncation_testing.assert_no_conflating_values`.
 
     Args:
         case: The case to read.
@@ -281,7 +248,9 @@ def _tuples(case: EdgeCase, columns: Sequence[str]) -> List[Tuple[Any, ...]]:
         One tuple per row of the case.
     """
     indices = [case.columns.index(name) for name in columns]
-    return [tuple(_cell(row[index]) for index in indices) for row in case.rows]
+    return [
+        tuple(normalize_value(row[index]) for index in indices) for row in case.rows
+    ]
 
 
 def _row_ids(case: EdgeCase) -> List[int]:
@@ -295,18 +264,6 @@ def _row_ids(case: EdgeCase) -> List[int]:
     """
     index = case.columns.index(ROW_ID_COLUMN)
     return [int(row[index]) for row in case.rows]
-
-
-def _output_row_ids(output: pd.DataFrame) -> List[int]:
-    """Returns the row ids of a truncated frame.
-
-    Args:
-        output: The frame a backend returned.
-
-    Returns:
-        One row id per surviving row.
-    """
-    return [int(value) for value in output[ROW_ID_COLUMN]]
 
 
 def _members(
@@ -435,9 +392,9 @@ def _edit_one_payload(case: EdgeCase, rows: List[Tuple[Any, ...]]) -> None:
     """
     index = case.columns.index(_payload_columns(case)[0])
     target = len(rows) // 2
-    current = _cell(rows[target][index])
+    current = normalize_value(rows[target][index])
     for other in rows:
-        if _cell(other[index]) != current:
+        if normalize_value(other[index]) != current:
             values = list(rows[target])
             values[index] = other[index]
             rows[target] = tuple(values)
@@ -508,7 +465,7 @@ def _assert_within_threshold(
         threshold: The threshold it was called with.
     """
     group_of = _group_of(case)
-    counts = Counter(group_of[row_id] for row_id in _output_row_ids(output))
+    counts = Counter(group_of[row_id] for row_id in frame_row_ids(output))
     too_large = {group: count for group, count in counts.items() if count > threshold}
     assert not too_large, f"groups over the threshold of {threshold}: {too_large}"
 
@@ -526,7 +483,7 @@ def _assert_keys_within_threshold(
     pair_of = _pair_of(case)
     grouping_size = len(case.grouping)
     surviving: Dict[Tuple[Any, ...], Set[Tuple[Any, ...]]] = {}
-    for row_id in _output_row_ids(output):
+    for row_id in frame_row_ids(output):
         pair = pair_of[row_id]
         surviving.setdefault(pair[:grouping_size], set()).add(pair[grouping_size:])
     too_many = {
@@ -544,7 +501,7 @@ def _assert_submultiset_by_row_id(case: EdgeCase, output: pd.DataFrame) -> None:
     """
     assert list(output.columns) == list(case.columns)
     available = Counter(_row_ids(case))
-    kept = Counter(_output_row_ids(output))
+    kept = Counter(frame_row_ids(output))
     extra = {
         row_id: count for row_id, count in kept.items() if count > available[row_id]
     }
@@ -579,7 +536,7 @@ def _assert_untouched_groups_pass_through(
         output: The truncated frame.
         threshold: The threshold it was called with.
     """
-    kept = set(_output_row_ids(output))
+    kept = set(frame_row_ids(output))
     keys_by_group = _keys_by_group(case)
     for group, row_ids in _members(case, case.grouping).items():
         if function == "limit_keys_per_group":
@@ -600,7 +557,7 @@ def _assert_drop_is_all_or_nothing(case: EdgeCase, output: pd.DataFrame) -> None
         case: The input frame.
         output: The result of ``drop_large_groups``.
     """
-    kept = set(_output_row_ids(output))
+    kept = set(frame_row_ids(output))
     for group, row_ids in _members(case, case.grouping).items():
         survivors = kept & set(row_ids)
         assert survivors in (set(), set(row_ids)), (
@@ -615,7 +572,7 @@ def _assert_surviving_keys_are_complete(case: EdgeCase, output: pd.DataFrame) ->
         case: The input frame.
         output: The result of ``limit_keys_per_group``.
     """
-    kept = set(_output_row_ids(output))
+    kept = set(frame_row_ids(output))
     pair_of = _pair_of(case)
     surviving = {pair_of[row_id] for row_id in kept}
     for pair, row_ids in _members(case, (*case.grouping, *case.keys)).items():
@@ -642,7 +599,8 @@ def _assert_stability(
 
     Args:
         backend_: The backend to run.
-        function: One of :data:`_FUNCTIONS`.
+        function: One of
+            :data:`~test.unit.utils.truncation_testing.TRUNCATION_FUNCTIONS`.
         case: The first frame of the pair.
         operation: The neighbor operation producing the second frame.
         threshold: The threshold to truncate with.
@@ -662,6 +620,34 @@ def _assert_stability(
     assert distance_out <= threshold * distance_in, (
         f"{function} on {case.id} with {operation} and threshold {threshold}: "
         f"output distance {distance_out} exceeds {threshold} * {distance_in}"
+    )
+
+
+def _assert_group_locality(
+    backend_: TruncationBackend,
+    function: str,
+    case: EdgeCase,
+    threshold: int,
+) -> None:
+    """Asserts that editing one group leaves the survivors of every other alone.
+
+    Args:
+        backend_: The backend to run.
+        function: One of
+            :data:`~test.unit.utils.truncation_testing.TRUNCATION_FUNCTIONS`.
+        case: The frame to perturb. It must carry a ``row_id`` column.
+        threshold: The threshold to truncate with.
+    """
+    edited_group, perturbed = _perturb_one_group(case)
+    elsewhere = {
+        row_id for row_id, group in _group_of(case).items() if group != edited_group
+    }
+    before = set(frame_row_ids(_run(backend_, function, case, threshold)))
+    after = set(frame_row_ids(_run(backend_, function, perturbed, threshold)))
+    assert before & elsewhere == after & elsewhere, (
+        f"{function} on {case.id} at threshold {threshold}: editing group "
+        f"{edited_group} changed the survivors of other groups: "
+        f"{(before ^ after) & elsewhere}"
     )
 
 
@@ -710,7 +696,7 @@ def test_limit_keys_keeps_at_most_threshold_keys_per_group(
 
 @pytest.mark.parametrize("threshold", _THRESHOLDS)
 @pytest.mark.parametrize("shape", _SHAPE_IDS)
-@pytest.mark.parametrize("function", _FUNCTIONS)
+@pytest.mark.parametrize("function", TRUNCATION_FUNCTIONS)
 def test_output_is_submultiset_of_input(
     backend: TruncationBackend, function: str, shape: str, threshold: int
 ) -> None:
@@ -720,7 +706,7 @@ def test_output_is_submultiset_of_input(
 
 
 @pytest.mark.parametrize("threshold", _DUPLICATE_THRESHOLDS)
-@pytest.mark.parametrize("function", _FUNCTIONS)
+@pytest.mark.parametrize("function", TRUNCATION_FUNCTIONS)
 def test_output_is_submultiset_of_duplicate_rows(
     backend: TruncationBackend, function: str, threshold: int
 ) -> None:
@@ -736,7 +722,7 @@ def test_output_is_submultiset_of_duplicate_rows(
 
 @pytest.mark.parametrize("threshold", _THRESHOLDS)
 @pytest.mark.parametrize("shape", _SHAPE_IDS)
-@pytest.mark.parametrize("function", _FUNCTIONS)
+@pytest.mark.parametrize("function", TRUNCATION_FUNCTIONS)
 def test_untouched_groups_pass_through(
     backend: TruncationBackend, function: str, shape: str, threshold: int
 ) -> None:
@@ -776,22 +762,13 @@ def test_limit_keys_keeps_every_row_of_surviving_keys(
 
 @pytest.mark.parametrize("threshold", _THRESHOLDS)
 @pytest.mark.parametrize("shape", _SHAPE_IDS)
-@pytest.mark.parametrize("function", _FUNCTIONS)
+@pytest.mark.parametrize("function", TRUNCATION_FUNCTIONS)
 def test_group_locality(
     backend: TruncationBackend, function: str, shape: str, threshold: int
 ) -> None:
     """Tests that editing one group leaves the survivors of every other alone."""
     case = _frame(shape, _BASE_SEED)
-    edited_group, perturbed = _perturb_one_group(case)
-    elsewhere = {
-        row_id for row_id, group in _group_of(case).items() if group != edited_group
-    }
-    before = set(_output_row_ids(_run(backend, function, case, threshold)))
-    after = set(_output_row_ids(_run(backend, function, perturbed, threshold)))
-    assert before & elsewhere == after & elsewhere, (
-        f"editing group {edited_group} changed the survivors of other groups: "
-        f"{(before ^ after) & elsewhere}"
-    )
+    _assert_group_locality(backend, function, case, threshold)
 
 
 ################################################################################
@@ -802,39 +779,26 @@ def test_group_locality(
 @pytest.mark.parametrize("threshold", _THRESHOLDS)
 @pytest.mark.parametrize("shape", _STABILITY_SHAPE_IDS)
 @pytest.mark.parametrize("operation", _NEIGHBOR_OPERATIONS)
-def test_truncate_large_groups_stability(
-    backend: TruncationBackend, operation: str, shape: str, threshold: int
+@pytest.mark.parametrize("function", TRUNCATION_FUNCTIONS)
+def test_stability(
+    backend: TruncationBackend,
+    function: str,
+    operation: str,
+    shape: str,
+    threshold: int,
 ) -> None:
-    """Tests the stability bound of truncate_large_groups on neighboring frames."""
+    """Tests each function's stability bound on neighboring frames.
+
+    For truncate_large_groups and drop_large_groups the bound is on rows;
+    for limit_keys_per_group it is per (group, key) pair.
+    """
     case = _frame(shape, _BASE_SEED)
-    _assert_stability(backend, "truncate_large_groups", case, operation, threshold)
-
-
-@pytest.mark.parametrize("threshold", _THRESHOLDS)
-@pytest.mark.parametrize("shape", _STABILITY_SHAPE_IDS)
-@pytest.mark.parametrize("operation", _NEIGHBOR_OPERATIONS)
-def test_drop_large_groups_stability(
-    backend: TruncationBackend, operation: str, shape: str, threshold: int
-) -> None:
-    """Tests the stability bound of drop_large_groups on neighboring frames."""
-    case = _frame(shape, _BASE_SEED)
-    _assert_stability(backend, "drop_large_groups", case, operation, threshold)
-
-
-@pytest.mark.parametrize("threshold", _THRESHOLDS)
-@pytest.mark.parametrize("shape", _STABILITY_SHAPE_IDS)
-@pytest.mark.parametrize("operation", _NEIGHBOR_OPERATIONS)
-def test_limit_keys_per_group_stability(
-    backend: TruncationBackend, operation: str, shape: str, threshold: int
-) -> None:
-    """Tests the per-key stability bound of limit_keys_per_group."""
-    case = _frame(shape, _BASE_SEED)
-    _assert_stability(backend, "limit_keys_per_group", case, operation, threshold)
+    _assert_stability(backend, function, case, operation, threshold)
 
 
 @pytest.mark.parametrize("threshold", _DUPLICATE_THRESHOLDS)
 @pytest.mark.parametrize("operation", ["drop-row", "add-duplicate"])
-@pytest.mark.parametrize("function", _FUNCTIONS)
+@pytest.mark.parametrize("function", TRUNCATION_FUNCTIONS)
 def test_stability_with_duplicate_rows(
     backend: TruncationBackend, function: str, operation: str, threshold: int
 ) -> None:
@@ -850,7 +814,7 @@ def test_stability_with_duplicate_rows(
 
 @pytest.mark.slow
 @pytest.mark.parametrize("shape", (*_SHAPE_IDS, _DUPLICATES_ID))
-@pytest.mark.parametrize("function", _FUNCTIONS)
+@pytest.mark.parametrize("function", TRUNCATION_FUNCTIONS)
 def test_structural_property_sweep(
     backend: TruncationBackend, function: str, shape: str
 ) -> None:
@@ -878,7 +842,7 @@ def test_structural_property_sweep(
 
 @pytest.mark.slow
 @pytest.mark.parametrize("shape", (*_SHAPE_IDS, _DUPLICATES_ID))
-@pytest.mark.parametrize("function", _FUNCTIONS)
+@pytest.mark.parametrize("function", TRUNCATION_FUNCTIONS)
 def test_stability_sweep(backend: TruncationBackend, function: str, shape: str) -> None:
     """Tests the stability bound over a sweep of seeded neighboring pairs."""
     for seed in _SWEEP_SEEDS[:4]:
@@ -890,21 +854,12 @@ def test_stability_sweep(backend: TruncationBackend, function: str, shape: str) 
 
 @pytest.mark.slow
 @pytest.mark.parametrize("shape", _SHAPE_IDS)
-@pytest.mark.parametrize("function", _FUNCTIONS)
+@pytest.mark.parametrize("function", TRUNCATION_FUNCTIONS)
 def test_group_locality_sweep(
     backend: TruncationBackend, function: str, shape: str
 ) -> None:
     """Tests locality over a sweep of seeded frames and thresholds."""
     for seed in _SWEEP_SEEDS[:3]:
         case = _frame(shape, seed)
-        edited_group, perturbed = _perturb_one_group(case)
-        elsewhere = {
-            row_id for row_id, group in _group_of(case).items() if group != edited_group
-        }
         for threshold in (1, 7):
-            before = set(_output_row_ids(_run(backend, function, case, threshold)))
-            after = set(_output_row_ids(_run(backend, function, perturbed, threshold)))
-            assert before & elsewhere == after & elsewhere, (
-                f"{function} on {case.id} at threshold {threshold}: editing group "
-                f"{edited_group} changed the survivors of other groups"
-            )
+            _assert_group_locality(backend, function, case, threshold)

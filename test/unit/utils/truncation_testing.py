@@ -1730,23 +1730,26 @@ def assert_no_conflating_values(df: pd.DataFrame, columns: Sequence[str]) -> Non
     """Asserts that no column mixes values :func:`normalize_value` conflates.
 
     The oracle identity :func:`normalize_value` induces is deliberately
-    coarser than the key identity of ``limit_keys_per_group``, which counts
-    *digests*: the oracle compares numbers by value, so int ``1`` and float
-    ``1.0`` -- which render, and therefore hash, as ``"1"`` and ``"1.0"``,
-    two distinct keys -- collapse onto one oracle key, as do ``0.0`` and
-    ``-0.0``. A frame mixing such a pair within one key column would not
-    fail any test on its own; it would silently weaken every assertion built
-    on the oracle. Calling this guard on the frames an oracle reads turns
-    that generator assumption into a loud failure instead. Two exemptions
-    are deliberate: the null flavors, which contribute nothing to a digest
-    and so can never be two keys, and equal values whose *types* differ but
+    coarser than the identity of ``limit_keys_per_group``, which counts
+    (group, *digest*, key) pairs: the oracle compares numbers by value, so
+    int ``1`` and float ``1.0`` -- which render, and therefore hash, as
+    ``"1"`` and ``"1.0"``, two distinct pairs -- collapse onto one oracle
+    key, as do ``0.0`` and ``-0.0``. The digest covers the grouping columns
+    as well as the key columns, so mixing such a pair in either kind of
+    column splits a pair the oracle keeps whole. It would not fail any test
+    on its own; it would silently weaken every assertion built on the
+    oracle. Calling this guard on the frames an oracle reads turns that
+    generator assumption into a loud failure instead. Two exemptions are
+    deliberate: the null flavors, which contribute nothing to a digest and
+    so can never be two keys, and equal values whose *types* differ but
     whose renderings do not (int ``1`` and ``np.int64(1)``, bytes and
     bytearrays of the same content), which a stricter type-tagged identity
     would wrongly split.
 
     Args:
         df: The frame to check.
-        columns: The columns whose values feed an oracle's key identity.
+        columns: The columns whose values feed an oracle's group or key
+            identity, deduplicated by the caller when the two lists overlap.
     """
     for name in columns:
         merged: Dict[Any, List[Any]] = {}

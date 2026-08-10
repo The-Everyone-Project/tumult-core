@@ -227,7 +227,7 @@ _HOMOGENEOUS_OBJECT_KINDS = frozenset({"string", "bytes", "empty"})
 #: Object-column kinds whose non-NA values are all renderable, so that
 #: validation needs no per-value scan (the NA-like values, which the
 #: ``skipna=True`` kind inference cannot see, are always checked separately,
-#: and ``string`` keeps the bulk UTF-8 encodability check of
+#: and ``string`` keeps the batched UTF-8 encodability check of
 #: :func:`_validate_string_uniques`).
 #: ``datetime`` is deliberately absent, because a timezone-aware datetime must
 #: still be rejected, and so is ``date``, which also covers columns mixing
@@ -236,6 +236,17 @@ _HOMOGENEOUS_OBJECT_KINDS = frozenset({"string", "bytes", "empty"})
 #: ``np.longdouble`` values that have no Spark rendering, and equal floats of
 #: different widths may differ in renderability, so it keeps the full scan.
 _RENDERABLE_OBJECT_KINDS = frozenset({"string", "bytes", "integer", "empty"})
+
+#: Character budget for one batch of :func:`_validate_string_uniques`'s
+#: join-and-encode check. Batching is what bounds the check's peak scratch
+#: memory: the joined string and its UTF-8 encoding each cost at most four
+#: bytes per character (UCS-4 string storage, four-byte UTF-8 sequences), so
+#: one batch allocates at most ~8 bytes per budgeted character -- a few tens
+#: of MiB -- no matter how much distinct-string content the column holds.
+#: A single value longer than the whole budget forms a batch of its own,
+#: degrading the bound only to the size of the largest single string, which
+#: the column already stores. Tests lower this to exercise the batching.
+_UTF8_VALIDATION_BATCH_CHARS = 4 * 1024 * 1024
 
 #: Whether the fast paths that restrict hashing to the rows that can actually
 #: be truncated are enabled. Tests set this to False to check that the fast
@@ -605,21 +616,73 @@ def _validate_string_uniques(uniques: Sequence[str], name: str) -> None:
     which both the fast and the full path run before choosing which rows to
     hash, so the two paths cannot disagree about the error.
 
-    The check costs one C-level join and encode over the *distinct* values.
-    Python's strict UTF-8 encoder rejects each surrogate code point by
-    itself -- it never pairs adjacent ones -- so the concatenation encodes
-    exactly when every value does, and no per-value Python loop is needed.
-    NA-like values are invisible to the factorization that produced the
-    uniques, exactly as they are in :func:`_validate_column`'s date branch.
+    The check costs one C-level join and encode per *batch* of the
+    *distinct* values. Python's strict UTF-8 encoder rejects each surrogate
+    code point by itself -- it never pairs adjacent ones -- so a
+    concatenation encodes exactly when every value in it does, and splitting
+    the values into batches changes nothing about what is accepted. The
+    batches are capped at :data:`_UTF8_VALIDATION_BATCH_CHARS` characters so
+    that the joined string and its encoding stay bounded scratch allocations
+    however large the column's total distinct-string content is; only a
+    failing batch is re-scanned one value at a time (see
+    :func:`_encode_string_batch`). NA-like values are invisible to the
+    factorization that produced the uniques, exactly as they are in
+    :func:`_validate_column`'s date branch.
 
     Args:
         uniques: The distinct values of a column whose non-NA values are all
             ``str``, as the uniques of its canonical factorization.
         name: The column's name, for the error message.
     """
+    # sum(map(len, ...)) runs the length scan at C speed, so the common case
+    # -- everything fits one batch -- stays the single join and encode, with
+    # one pass of len() calls on top and no per-value Python loop.
+    if sum(map(len, uniques)) <= _UTF8_VALIDATION_BATCH_CHARS:
+        _encode_string_batch(uniques, name)
+        return
+    batch: List[str] = []
+    batch_chars = 0
+    for value in uniques:
+        # Flushing before the append keeps every batch within the budget;
+        # only a value that alone exceeds it becomes an oversized batch of
+        # one, and the column already stores that value.
+        if batch and batch_chars + len(value) > _UTF8_VALIDATION_BATCH_CHARS:
+            _encode_string_batch(batch, name)
+            batch = []
+            batch_chars = 0
+        batch.append(value)
+        batch_chars += len(value)
+    if batch:
+        _encode_string_batch(batch, name)
+
+
+def _encode_string_batch(batch: Sequence[str], name: str) -> None:
+    """Raises unless one batch of string values can be encoded as UTF-8.
+
+    This is the join-and-encode step of :func:`_validate_string_uniques`. A
+    batch fails exactly when some value in it fails (the strict encoder never
+    pairs surrogates across values), so a failing batch is re-scanned one
+    value at a time and the error chained from the offending value's own
+    ``UnicodeEncodeError`` rather than from an offset inside the
+    concatenation. The batch's own error is kept as the cause only for the
+    impossible case where no single value fails, so a failed batch can never
+    pass silently.
+
+    Args:
+        batch: The string values to encode, as one concatenation.
+        name: The column's name, for the error message.
+    """
     try:
-        "".join(uniques).encode("utf-8")
-    except UnicodeEncodeError as error:
+        "".join(batch).encode("utf-8")
+        return
+    except UnicodeEncodeError as batch_error:
+        error: UnicodeEncodeError = batch_error
+        for value in batch:
+            try:
+                value.encode("utf-8")
+            except UnicodeEncodeError as value_error:
+                error = value_error
+                break
         raise NotImplementedError(
             f"Unsupported string value in column {name}; the value cannot "
             "be encoded as UTF-8, which usually means it contains an "
@@ -793,23 +856,48 @@ def _microsecond_keys(column: pd.Series) -> np.ndarray:
     return values.view("int64")
 
 
-def _canonical_factorization(
-    column: pd.Series, klass: _ColumnClass
-) -> Tuple[np.ndarray, Sequence[Any]]:
-    """Returns ``pd.factorize`` of a column's canonical array for its class.
+def _canonical_array(column: pd.Series, klass: _ColumnClass) -> np.ndarray:
+    """Returns the array a column's class canonically factorizes.
 
     The canonical array is the exact array the class's branches in
     :func:`_validate_column`, :func:`_group_codes` and :func:`_digest_codes`
     all factorize -- the *identical* input, so one factorization serves all
-    three, which is what lets a :class:`_FactorizeMemo` share it. The float
-    and datetime classes have no canonical array: their consumers factorize
-    *different* derived arrays (bit patterns versus values, raw versus
-    microsecond-floored), which must never be merged.
+    three, which is what lets a :class:`_FactorizeMemo` share it.
+    :func:`_order_keys` ranks the same array, and derives those ranks from
+    the shared factorization rather than building another one (see
+    :func:`_dense_ranks_from_factorization`). The float and datetime classes
+    have no canonical array: their consumers factorize *different* derived
+    arrays (bit patterns versus values, raw versus microsecond-floored),
+    which must never be merged.
+
+    Args:
+        column: The column whose canonical array is built.
+        klass: The column's :func:`_column_class`, which every caller has
+            already computed. It must be one of the four classes named here.
+
+    Returns:
+        The array the class's consumers factorize.
+    """
+    if klass is _ColumnClass.NULLABLE_INT:
+        return _nullable_int_values(column)
+    if klass is _ColumnClass.NUMPY_INT:
+        return column.to_numpy()
+    if klass is _ColumnClass.STRING:
+        return column.to_numpy(object, na_value=None)
+    if klass is _ColumnClass.HOMOGENEOUS_OBJECT:
+        return column.to_numpy()
+    raise AssertionError(f"No canonical factorization for {klass}")
+
+
+def _canonical_factorization(
+    column: pd.Series, klass: _ColumnClass
+) -> Tuple[np.ndarray, Sequence[Any]]:
+    """Returns ``pd.factorize`` of a column's :func:`_canonical_array`.
 
     Args:
         column: The column to factorize.
-        klass: The column's :func:`_column_class`, which every caller has
-            already computed. It must be one of the four classes named here.
+        klass: The column's :func:`_column_class`, as
+            :func:`_canonical_array` takes it.
 
     Returns:
         The ``(codes, uniques)`` pair as ``pd.factorize`` returns it, with
@@ -821,35 +909,33 @@ def _canonical_factorization(
             holding a value it cannot hash, such as a bytearray. The
             callers' fallbacks expect exactly this.
     """
-    if klass is _ColumnClass.NULLABLE_INT:
-        return pd.factorize(_nullable_int_values(column))
-    if klass is _ColumnClass.NUMPY_INT:
-        return pd.factorize(column.to_numpy())
-    if klass is _ColumnClass.STRING:
-        return pd.factorize(column.to_numpy(object, na_value=None))
-    if klass is _ColumnClass.HOMOGENEOUS_OBJECT:
-        return pd.factorize(column.to_numpy())
-    raise AssertionError(f"No canonical factorization for {klass}")
+    return pd.factorize(_canonical_array(column, klass))
 
 
 class _FactorizeMemo:
     """A per-call cache of canonical factorizations and null/NaN masks.
 
     Within one call of a hashing truncation function, the same full-frame
-    column is factorized by up to three consumers -- validation's UTF-8
-    encodability check, :func:`_group_codes`, and, in
-    :func:`limit_keys_per_group`, the digest codes behind the refined budget
-    test -- and for the classes :func:`_canonical_factorization` covers,
-    those are factorizations of the identical array. The public functions
-    pass one memo down so that the factorization, the most expensive
-    per-column step, runs once per column instead of two or three times; the
-    object columns' :func:`_null_and_nan_masks`, recomputed by the same
-    consumers, are shared the same way.
+    column is factorized by several consumers -- validation's UTF-8
+    encodability check, :func:`_group_codes`, the :func:`_digest_codes`
+    behind :func:`limit_keys_per_group`'s refined budget test and behind the
+    row hashing itself, and the dense ranks of :func:`_order_keys` -- and for
+    the classes :func:`_canonical_array` covers, those are factorizations of
+    the identical array. The public functions pass one memo down so that the
+    factorization, the most expensive per-column step, runs once per column
+    however many of those consumers ask for it; the object columns'
+    :func:`_null_and_nan_masks`, recomputed by the same consumers, are shared
+    the same way. :func:`_order_keys` needs that factorization's codes in the
+    ascending order of its uniques, and derives them from the shared
+    factorization without a second pass over the rows (see
+    :func:`_dense_ranks_from_factorization`).
 
     The memo is keyed by column name, so a memo must only ever see columns
     of the one frame its call is truncating -- in particular never the fast
-    paths' frames of selected rows, whose columns share names with the full
-    frame's but hold fewer rows.
+    paths' frames of selected or representative rows, whose columns share
+    names with the full frame's but hold fewer rows. The row-hashing call
+    sites therefore pass it only on the branches where the frame they hash
+    *is* the full frame.
     """
 
     def __init__(self) -> None:
@@ -1023,13 +1109,23 @@ class _ColumnDigests(NamedTuple):
     has_null: bool
 
 
-def _column_digests(column: pd.Series) -> _ColumnDigests:
+def _column_digests(
+    column: pd.Series, memo: Optional[_FactorizeMemo] = None
+) -> _ColumnDigests:
     """Hashes every value of a column, hashing each distinct value once.
+
+    Args:
+        column: The column to hash.
+        memo: A per-call memo sharing the canonical factorizations and masks
+            with the other consumers, or None to compute everything here. A
+            memo may only be passed for a column of the frame its call is
+            truncating, never for a selection of that frame's rows (see
+            :class:`_FactorizeMemo`).
 
     Returns:
         The per-row digests, and whether any of them is None.
     """
-    codes_and_values = _digest_codes(column)
+    codes_and_values = _digest_codes(column, memo)
     if codes_and_values is None:
         # No faithful factorization exists, so every value is rendered, as it
         # was before deduplication.
@@ -1330,6 +1426,59 @@ def _dense_ranks(values: np.ndarray) -> np.ndarray:
     return np.where(codes < 0, 0, codes).astype(np.int64, copy=False)
 
 
+def _dense_ranks_from_factorization(
+    factorization: Tuple[np.ndarray, Sequence[Any]],
+) -> np.ndarray:
+    """Returns :func:`_dense_ranks` of a canonical factorization's own array.
+
+    ``pd.factorize(values, sort=True)`` is ``pd.factorize(values)`` with its
+    codes remapped to the ascending order of its uniques, so ranking the
+    *distinct* values and fanning the ranks back out over the codes gives the
+    identical result. That is what lets a :class:`_FactorizeMemo`'s shared
+    factorization serve the ordering too, at one sort of the uniques instead
+    of another pass over every row.
+
+    Args:
+        factorization: The ``(codes, uniques)`` pair, as
+            :func:`_canonical_factorization` returns it, with the missing
+            positions carrying ``pd.factorize``'s sentinel.
+
+    Returns:
+        An int64 array aligned with the codes.
+
+    Raises:
+        TypeError: When the uniques have no order, exactly as
+            :func:`_dense_ranks` raises it for the same values.
+    """
+    codes, uniques = factorization
+    # Slot 0 is the missing-value slot, which ranks zero as it does in
+    # _dense_ranks; the caller's class key is what separates it from the
+    # values, one of which may rank zero too.
+    ranks = np.zeros(len(uniques) + 1, dtype=np.int64)
+    ranks[1:] = pd.factorize(uniques, sort=True)[0]
+    return ranks[codes + 1]
+
+
+def _memoized_dense_ranks(
+    column: pd.Series, klass: _ColumnClass, memo: Optional[_FactorizeMemo]
+) -> np.ndarray:
+    """Returns the dense ranks of a column's canonical array, through the memo.
+
+    Without a memo the array is ranked directly; with one, the ranks come out
+    of the shared canonical factorization, so ordering costs no factorization
+    of its own.
+
+    Raises:
+        TypeError: When the column has no faithful factorization, or its
+            values have no order -- the two failures :func:`_dense_ranks`
+            raises, and which :func:`_order_keys`'s object branch falls back
+            on either way.
+    """
+    if memo is None:
+        return _dense_ranks(_canonical_array(column, klass))
+    return _dense_ranks_from_factorization(memo.factorization(column, klass))
+
+
 def _fallback_order_keys(column: pd.Series) -> _OrderKeys:
     """Returns order keys for a column with no vectorized ordering.
 
@@ -1347,13 +1496,21 @@ def _fallback_order_keys(column: pd.Series) -> _OrderKeys:
     return _OrderKeys(None, np.array([ranks[key] for key in keys], dtype=np.int64))
 
 
-def _order_keys(column: pd.Series) -> _OrderKeys:
+def _order_keys(column: pd.Series, memo: Optional[_FactorizeMemo] = None) -> _OrderKeys:
     """Returns the sort keys ordering a column the way Spark orders it.
 
     The keys are absolute -- derived from the values themselves, or from
     dense ranks over the whole column -- so restricting them to a subset of
     the rows induces the same order on that subset. That is what lets the
     fast path compute them once, before deciding which rows to hash.
+
+    Args:
+        column: The column to order.
+        memo: A per-call memo sharing the canonical factorizations and masks
+            with the other consumers, or None to compute everything here.
+            Because the ranks must be those of the whole column, only the
+            frame being truncated may be ordered against its own memo (see
+            :class:`_FactorizeMemo`).
 
     Returns:
         The class and value keys for the column.
@@ -1372,9 +1529,10 @@ def _order_keys(column: pd.Series) -> _OrderKeys:
         values = _nullable_int_values(column)
         return _OrderKeys(_order_classes(null_mask, None), values)
     if klass is _ColumnClass.STRING:
-        strings = column.to_numpy(object, na_value=None)
         null_mask = column.isna().to_numpy()
-        return _OrderKeys(_order_classes(null_mask, None), _dense_ranks(strings))
+        return _OrderKeys(
+            _order_classes(null_mask, None), _memoized_dense_ranks(column, klass, memo)
+        )
     if klass is _ColumnClass.NUMPY_INT:
         # Any monotone key works; the raw integers are one.
         return _OrderKeys(None, column.to_numpy())
@@ -1390,10 +1548,9 @@ def _order_keys(column: pd.Series) -> _OrderKeys:
         values = np.where(null_mask, np.int64(0), _microsecond_keys(column))
         return _OrderKeys(_order_classes(null_mask, None), values)
     if klass is _ColumnClass.HOMOGENEOUS_OBJECT:
-        objects = column.to_numpy()
-        null_mask, nan_mask = _null_and_nan_masks(objects)
+        null_mask, nan_mask = _memoized_null_and_nan_masks(column, memo)
         try:
-            values = _dense_ranks(objects)
+            values = _memoized_dense_ranks(column, klass, memo)
         except TypeError:
             return _fallback_order_keys(column)
         return _OrderKeys(_order_classes(null_mask, nan_mask), values)
@@ -1661,6 +1818,10 @@ def truncate_large_groups(
     positions = np.flatnonzero(selected)
     # Taking every position would only copy the frame for nothing.
     sub = working_df if selected.all() else working_df.iloc[positions]
+    # The memo's factorizations are of the full frame's columns, so everything
+    # computed on sub may consult it only when sub is that very frame -- the
+    # case the memo exists for, since that is where the most is hashed.
+    sub_memo = memo if sub is working_df else None
     # Identical rows must hash differently, or they would be kept or dropped
     # as a block. Spark numbers them with row_number over a window partitioned
     # by every column, which is a cumulative count over identical rows. Each
@@ -1668,8 +1829,7 @@ def truncate_large_groups(
     # the selected rows leaves every salt unchanged (the salt-locality step of
     # the "Fast paths" argument) -- and because the partition is intrinsic to
     # the values, the non-grouping columns' codes can be computed on the
-    # selected rows directly (and take no memo, whose factorizations are
-    # full-frame). The salt also makes deduplicating whole rows
+    # selected rows directly. The salt also makes deduplicating whole rows
     # before hashing pointless: (values, salt) is unique per row by
     # construction.
     if starting_columns:
@@ -1678,7 +1838,7 @@ def truncate_large_groups(
                 [
                     group_code[column][positions]
                     if column in group_code
-                    else _group_codes(sub[column])
+                    else _group_codes(sub[column], sub_memo)
                     for column in starting_columns
                 ],
                 sort=False,
@@ -1691,7 +1851,9 @@ def truncate_large_groups(
         # full-frame count at position p is p itself.
         salt = positions + 1
     digests = _row_digests(
-        [_column_digests(sub[column]) for column in starting_columns]
+        [_column_digests(sub[column], sub_memo) for column in starting_columns]
+        # The salt is derived here, not a column of the frame, so it has
+        # nothing in the memo and must not be entered into it either.
         + [_column_digests(pd.Series(salt))],
         len(sub),
     )
@@ -1701,7 +1863,7 @@ def truncate_large_groups(
         # (the restriction step of the "Fast paths" argument). They matter
         # only when two digests collide, so they are built lazily.
         order_keys = {
-            column: _order_keys(working_df[column]) for column in starting_columns
+            column: _order_keys(working_df[column], memo) for column in starting_columns
         }
         return _tie_break_keys(order_keys, starting_columns, positions)
 
@@ -1965,6 +2127,8 @@ def limit_keys_per_group(
         class_codes = pd.factorize(refined.codes[positions])[0]
         class_first = _first_occurrences(class_codes)
         representatives = working_df.iloc[positions[class_first]]
+        # One row per class is a strict selection of the frame's rows, so the
+        # memo -- whose factorizations are full-frame -- has no part in it.
         column_digests = {
             column: _column_digests(representatives[column]) for column in hashed_unique
         }
@@ -1979,8 +2143,12 @@ def limit_keys_per_group(
     else:
         # Taking every position would only copy the frame for nothing.
         sub = working_df if selected.all() else working_df.iloc[positions]
+        # The memo's factorizations are of the full frame's columns, so they
+        # may be reused only when sub is that very frame -- which is the case
+        # this branch is reached in whenever every group is over its budget.
+        sub_memo = memo if sub is working_df else None
         column_digests = {
-            column: _column_digests(sub[column]) for column in hashed_unique
+            column: _column_digests(sub[column], sub_memo) for column in hashed_unique
         }
         digests = _row_digests([column_digests[column] for column in hashed], len(sub))
         digest_codes = pd.factorize(digests)[0]
@@ -2004,7 +2172,9 @@ def limit_keys_per_group(
         # The order keys are computed over the full frame and then restricted
         # (the restriction step of the "Fast paths" argument). They matter
         # only when two pair digests collide, so they are built lazily.
-        order_keys = {column: _order_keys(working_df[column]) for column in key_unique}
+        order_keys = {
+            column: _order_keys(working_df[column], memo) for column in key_unique
+        }
         return _tie_break_keys(order_keys, list(key_columns), pair_positions)
 
     ordered_pairs = pair_first[

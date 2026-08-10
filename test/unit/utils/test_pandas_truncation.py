@@ -69,6 +69,8 @@ from tmlt.core.utils.pandas_truncation import (
     _column_values,
     _combined_hash,
     _digest_codes,
+    _encode_string_batch,
+    _FactorizeMemo,
     _group_codes,
     _group_key,
     _hash_columns,
@@ -81,6 +83,7 @@ from tmlt.core.utils.pandas_truncation import (
     _sorted_keys,
     _tie_break_keys,
     _validate_column,
+    _validate_string_uniques,
     drop_large_groups,
     limit_keys_per_group,
     truncate_large_groups,
@@ -1145,14 +1148,23 @@ def _reference_order_codes(column: pd.Series) -> np.ndarray:
     return np.array([ranks[key] for key in keys], dtype=np.int64)
 
 
-def _order_keys_lexsort_keys(df: pd.DataFrame, cols: List[str]) -> List[np.ndarray]:
+def _order_keys_lexsort_keys(
+    df: pd.DataFrame, cols: List[str], memo: Optional[_FactorizeMemo] = None
+) -> List[np.ndarray]:
     """Returns the lexsort keys ``_order_keys`` produces for ``cols``.
 
     The keys are assembled by the same ``_tie_break_keys`` the truncation
     functions use, taken at every row, so this exercises the real assembly
     convention rather than mirroring it.
+
+    Args:
+        df: The frame whose columns are ordered.
+        cols: The columns to order by, from highest to lowest priority.
+        memo: The memo to order through, or None to derive every key from
+            the column alone. The truncation functions always pass the
+            call's memo, which shares one factorization per column.
     """
-    order_keys = {column: _order_keys(df[column]) for column in cols}
+    order_keys = {column: _order_keys(df[column], memo) for column in cols}
     return _tie_break_keys(order_keys, cols, np.arange(len(df)))
 
 
@@ -1163,6 +1175,12 @@ def test_order_keys_match_reference_order():
     order-equivalent: both sorts are stable, so any difference means a tie
     was broken differently, which changes which rows survive a truncation
     whenever digests collide.
+
+    The keys are checked with and without a memo. A memo changes only how a
+    column's factorization is obtained -- the ranks are then derived from it
+    rather than by factorizing the rows a second time -- so the two must
+    produce byte-identical keys, and the truncation functions only ever take
+    the memoized path.
     """
     checked = 0
     for frame_id, df in _reference_frames():
@@ -1174,7 +1192,12 @@ def test_order_keys_match_reference_order():
             expected = np.lexsort(
                 [_reference_order_codes(df[c]) for c in reversed(cols)]
             )
-            actual = np.lexsort(_order_keys_lexsort_keys(df, cols))
+            keys = _order_keys_lexsort_keys(df, cols)
+            memoized = _order_keys_lexsort_keys(df, cols, _FactorizeMemo())
+            assert len(keys) == len(memoized), f"{frame_id} {cols}"
+            for key, memo_key in zip(keys, memoized):
+                assert np.array_equal(key, memo_key), f"{frame_id} {cols}"
+            actual = np.lexsort(keys)
             assert (actual == expected).all(), f"{frame_id} {cols}"
             checked += 1
     assert checked > 0
@@ -1631,6 +1654,63 @@ def test_surrogate_strings_raise_on_both_fast_and_full_paths():
                 truncate_large_groups(df, ["g"], 1)
             with pytest.raises(NotImplementedError, match="encoded as UTF-8"):
                 limit_keys_per_group(df, ["g"], ["s"], 1)
+
+
+def test_validate_string_uniques_batches_stay_within_budget(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The encodability check is batched, and the batches respect the budget.
+
+    Batching is what bounds the check's peak scratch memory (see
+    :data:`~tmlt.core.utils.pandas_truncation._UTF8_VALIDATION_BATCH_CHARS`),
+    so the batches must cover every distinct value in order, stay within the
+    character budget except when a single value alone exceeds it, and accept
+    encodable values wherever the batch boundaries fall -- including a batch
+    filled to exactly the budget, an oversized batch of one, and the empty
+    string.
+    """
+    batches: List[List[str]] = []
+
+    def recording_encode_batch(batch: Sequence[str], name: str) -> None:
+        batches.append(list(batch))
+        _encode_string_batch(batch, name)
+
+    monkeypatch.setattr(pandas_truncation, "_UTF8_VALIDATION_BATCH_CHARS", 8)
+    monkeypatch.setattr(
+        pandas_truncation, "_encode_string_batch", recording_encode_batch
+    )
+    values = ["aaa", "bbb", "cc", "d" * 20, "ee", "fff", ""]
+    _validate_string_uniques(values, "c")
+    assert [value for batch in batches for value in batch] == values
+    assert len(batches) > 1
+    for batch in batches:
+        assert sum(map(len, batch)) <= 8 or len(batch) == 1
+
+
+@parametrize(
+    Case("first-batch")(values=[_SURROGATE_STRING, "aaaa", "bbbb", "cccc"]),
+    Case("later-batch")(values=["aaaa", "bbbb", "cccc", _SURROGATE_STRING]),
+    Case("oversized-value")(values=["aaaa", "x" * 32 + _SURROGATE_STRING, "bbbb"]),
+)
+def test_validate_string_uniques_rejects_surrogates_in_any_batch(
+    monkeypatch: pytest.MonkeyPatch, values: List[str]
+):
+    """A surrogate string is rejected whichever batch it lands in.
+
+    The lowered budget forces several batches, and the rejection must come
+    from the first batch, from a later one, and from an oversized batch of
+    one alike -- always as the module's :class:`NotImplementedError`, chained
+    from the offending value's own ``UnicodeEncodeError`` by the failing
+    batch's per-value re-scan, never from an offset inside a concatenation.
+    """
+    monkeypatch.setattr(pandas_truncation, "_UTF8_VALIDATION_BATCH_CHARS", 8)
+    with pytest.raises(
+        NotImplementedError, match=r"column c.*encoded as UTF-8"
+    ) as excinfo:
+        _validate_string_uniques(values, "c")
+    cause = excinfo.value.__cause__
+    assert isinstance(cause, UnicodeEncodeError)
+    assert cause.object == next(value for value in values if _SURROGATE_STRING in value)
 
 
 def test_empty_object_column_cannot_be_validated():

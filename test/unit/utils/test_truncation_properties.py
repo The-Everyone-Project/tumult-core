@@ -181,14 +181,20 @@ def _frame(shape: str, seed: int) -> EdgeCase:
     """
     arguments = _DUPLICATES_SHAPE if shape == _DUPLICATES_ID else _SHAPES[shape]
     case = random_frame(random.Random(seed), case_id=f"{shape}-{seed}", **arguments)
-    # Every limit_keys_per_group oracle in this module reads key identity
-    # through normalize_value, which is coarser than the digest identity the
-    # implementations count keys by (see assert_no_conflating_values). Every
-    # frame the oracles read comes from here -- the neighbor and perturbed
-    # frames only reuse key values already in the base frame -- so this one
-    # guard makes a generator change that starts mixing conflating values
-    # fail loudly instead of silently weakening the oracle.
-    assert_no_conflating_values(case.to_pandas(), case.keys)
+    # Every oracle in this module reads group and key identity through
+    # normalize_value, which is coarser than the identity the implementations
+    # use: limit_keys_per_group counts (group, digest, key) pairs, and the
+    # digest splits int 1 from float 1.0 and 0.0 from -0.0 in a grouping
+    # column exactly as it does in a key column (see
+    # assert_no_conflating_values). Both column lists are therefore guarded,
+    # deduplicated because a column may be both. Every frame the oracles read
+    # comes from here -- the neighbor and perturbed frames only reuse values
+    # already in the base frame -- so this one guard makes a generator change
+    # that starts mixing conflating values fail loudly instead of silently
+    # weakening the oracle.
+    assert_no_conflating_values(
+        case.to_pandas(), list(dict.fromkeys([*case.grouping, *case.keys]))
+    )
     return case
 
 
@@ -235,9 +241,9 @@ def _tuples(case: EdgeCase, columns: Sequence[str]) -> List[Tuple[Any, ...]]:
     NaN in with a sentinel (NaN is not equal to itself, so it cannot be used
     as a dictionary key directly). Note that 0.0 and -0.0 stay conflated, as
     Python conflates them, and so do int 1 and float 1.0. Telling them apart
-    would matter in a key column, where Spark counts each pair as two keys
-    because their hashes differ, but the generator never mixes them in one;
-    :func:`_frame` checks that assumption with
+    would matter in a grouping or key column, where Spark counts each pair as
+    two keys because their hashes differ, but the generator never mixes them
+    in one; :func:`_frame` checks that assumption for both column lists with
     :func:`~test.unit.utils.truncation_testing.assert_no_conflating_values`.
 
     Args:

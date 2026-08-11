@@ -5,7 +5,14 @@ readme = "README.md"
 authors = []
 license = "Apache-2.0"
 
-dynamic = ["version"]
+# NOTE (The-Everyone-Project fork): this branch pins a static PEP 440 local
+# version instead of deriving it from the git tag. The upstream
+# uv-dynamic-versioning pattern only matches `X.Y.Z[-stage.N]`, so a tag like
+# `0.19.1-ep-pandas-1` would silently fall back to a bare `0.19.1` and produce
+# wheels indistinguishable from the official release. The local version
+# `+ep.pandas.1` sorts after `0.19.1`, satisfies `>=0.19.1,<0.20`, and cannot be
+# uploaded to PyPI.
+version = "0.19.1+ep.pandas.1"
 
 classifiers = [
   "Development Status :: 4 - Beta",
@@ -110,18 +117,12 @@ scripting = [
 # Build configuration
 
 [build-system]
-requires = ["hatchling", "uv-dynamic-versioning"]
+requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.hatch.version]
-source = "uv-dynamic-versioning"
-
-[tool.uv-dynamic-versioning]
-vcs = "git"
-style = "semver"
-# The default configuration expect vX.Y.Z, but we haven't been using the 'v' prefix.
-pattern = "^(?P<base>\\d+\\.\\d+\\.\\d+)(-(?P<stage>[a-zA-Z]+)\\.(?P<revision>\\d+))?"
-commit-length = 8
+# NOTE (The-Everyone-Project fork): `[tool.hatch.version]` and
+# `[tool.uv-dynamic-versioning]` are intentionally removed here; the version is
+# static in `[project]` above. See the comment there.
 
 [tool.hatch.build.hooks.version]
 path = "src/tmlt/core/_version.py"

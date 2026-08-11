@@ -2122,6 +2122,7 @@ wheels = [
 
 [[package]]
 name = "tmlt-core"
+version = "0.19.1+ep.pandas.1"
 source = { editable = "." }
 dependencies = [
     { name = "numpy" },

@@ -120,9 +120,25 @@ scripting = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-# NOTE (The-Everyone-Project fork): `[tool.hatch.version]` and
-# `[tool.uv-dynamic-versioning]` are intentionally removed here; the version is
-# static in `[project]` above. See the comment there.
+# NOTE (The-Everyone-Project fork): `[tool.hatch.version]` is intentionally
+# removed -- the build no longer derives a version from git, it uses the static
+# `version` in `[project]` above.
+#
+# `[tool.uv-dynamic-versioning]` below is kept only because tmlt.nox_utils reads
+# it (via uv_dynamic_versioning.main.get_version) when noxfile.py is imported;
+# without it, every nox session dies with
+# `AttributeError: 'NoneType' object has no attribute 'vcs'`. The constant
+# `format-jinja` makes it report the same version the build produces rather than
+# a tag-derived bare "0.19.1", and `fallback-version` covers shallow CI clones
+# where no tag is reachable.
+[tool.uv-dynamic-versioning]
+vcs = "git"
+style = "semver"
+# The default configuration expect vX.Y.Z, but we haven't been using the 'v' prefix.
+pattern = "^(?P<base>\\d+\\.\\d+\\.\\d+)(-(?P<stage>[a-zA-Z]+)\\.(?P<revision>\\d+))?"
+commit-length = 8
+format-jinja = "0.19.1+ep.pandas.1"
+fallback-version = "0.19.1+ep.pandas.1"
 
 [tool.hatch.build.hooks.version]
 path = "src/tmlt/core/_version.py"

@@ -6,7 +6,7 @@ Times :func:`~tmlt.core.utils.pandas_truncation.truncate_large_groups`,
 Spark counterparts in :mod:`tmlt.core.utils.truncation`, over frames whose only
 variable is the group-size distribution:
 
-* ``adversarial``: ~10 rows per group, threshold 3, so nearly every row is in
+* ``worst-case``: ~10 rows per group, threshold 3, so nearly every row is in
   an oversized group. Pure hash-and-sort throughput; a fast path that skips
   rows in small groups cannot help here.
 * ``realistic``: geometric group sizes (mean ~3.5), threshold 5, the shape
@@ -40,13 +40,13 @@ SEED = 20260809
 
 SIZES = (1_000, 10_000, 100_000, 1_000_000)
 
-DISTRIBUTIONS = ("adversarial", "realistic", "all-under", "wide-pairs")
+DISTRIBUTIONS = ("worst-case", "realistic", "all-under", "wide-pairs")
 
 FUNCTIONS = ("truncate_large_groups", "drop_large_groups", "limit_keys_per_group")
 
 #: The truncation threshold used with each distribution.
 THRESHOLDS = {
-    "adversarial": 3,
+    "worst-case": 3,
     "realistic": 5,
     "all-under": 100,
     "wide-pairs": 2,
@@ -69,7 +69,7 @@ def make_frame(distribution: str, n_rows: int) -> pd.DataFrame:
         The generated frame.
     """
     rng = np.random.default_rng(SEED)
-    if distribution in ("adversarial", "all-under"):
+    if distribution in ("worst-case", "all-under"):
         ids = rng.integers(0, max(n_rows // 10, 1), size=n_rows, dtype=np.int64)
         n_keys = 50
     elif distribution == "realistic":

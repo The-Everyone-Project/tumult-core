@@ -163,6 +163,16 @@ Changed
   wrappers. It is re-exported under its old name, and the Spark wrappers derived from
   it are unchanged, so nothing that imports it moves.
 
+Fixed
+~~~~~
+
+- Importing :mod:`tmlt.core.utils.cleanup` no longer starts a JVM at interpreter
+  exit. Its ``atexit`` hook asked for a Spark session with ``getOrCreate``, which
+  built one -- JVM included -- in any process that had not already made one, purely
+  to drop a temporary database that such a process cannot have created. It now uses
+  the active session and returns when there is none. Nothing changes for a process
+  that does use Spark.
+
 .. _v0.19.1:
 
 0.19.1 - 2026-06-04

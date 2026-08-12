@@ -7,6 +7,7 @@ import atexit
 import logging
 import os
 import sys
+from test.unit.backend_testing import BACKEND_NAMES, Backend
 from typing import Any, Iterator, List, NoReturn
 from unittest.mock import Mock, create_autospec
 
@@ -73,6 +74,51 @@ def pyspark():
 def class_spark(request, spark):
     """Injects spark into class tests that do not accept it as a parameter."""
     request.cls.spark = spark
+
+
+################################################################################
+# Backend parity
+################################################################################
+
+# One parameter per backend, with only the Spark one marked. Marking the
+# parameter rather than the test is the whole point: a test that takes the
+# `backend` fixture is half Spark and half pandas, and `-m "not spark"` has to
+# deselect only the Spark half. See test/unit/backend_testing/__init__.py.
+_BACKEND_PARAMS = [
+    pytest.param(name, marks=pytest.mark.spark) if name == "spark" else name
+    for name in BACKEND_NAMES
+]
+
+
+@pytest.fixture(params=_BACKEND_PARAMS)
+def backend(request: pytest.FixtureRequest) -> Backend:
+    """Returns each backend under test in turn.
+
+    This lives here, rather than in the conftest of one test directory, because
+    the pandas backend is landing across the whole of Core: any suite that has
+    both a Spark and a pandas implementation to compare should be able to take
+    this fixture and be run against both.
+
+    A suite needing a richer backend object should *override* this fixture in
+    its own conftest and build on the value it yields, rather than
+    reparametrizing, so that the parametrization, the marker, and the lazy
+    Spark session below keep living in one place. See
+    ``test/unit/utils/conftest.py`` for an example.
+
+    Args:
+        request: The pytest request, carrying the backend name.
+
+    Returns:
+        The backend to test.
+    """
+    if request.param == "spark":
+        # The Spark session is fetched lazily with getfixturevalue, rather than
+        # requested as a fixture parameter, so that the pandas runs of every
+        # test never pay for a Spark session (and its JVM) they do not use --
+        # and so that `spark` stays out of the static fixture closure that
+        # pytest_collection_modifyitems below reads.
+        return Backend(name="spark", spark=request.getfixturevalue("spark"))
+    return Backend(name=request.param)
 
 
 ################################################################################

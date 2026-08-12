@@ -81,6 +81,39 @@ Added
   point column stays a NaN, since there it is a value rather than a missing value. The
   full per-dtype mapping is documented on
   :mod:`tmlt.core.transformations.pandas_transformations.map`.
+- Added the pandas measurement layer, closing the counts-only pandas slice:
+  :class:`tmlt.core.measurements.pandas_measurements.table.AddNoiseToColumn`, which
+  adds an :class:`.AddNoiseToSeries`' noise to one aggregated column of a
+  :class:`.PandasTableDomain` frame, and
+  :mod:`tmlt.core.measurements.pandas_aggregations`, with
+  :func:`~tmlt.core.measurements.pandas_aggregations.create_count_measurement` and
+  :func:`~tmlt.core.measurements.pandas_aggregations.create_count_distinct_measurement`.
+  Each factory has the same signature as its twin in
+  :mod:`tmlt.core.measurements.aggregations` -- same parameter names, order and
+  defaults, typed on the pandas domains and transformations -- and, over the same
+  query, the same privacy function: the two backends spend identical budget and
+  reject identical budget/mechanism combinations. Unlike the Spark ``count``
+  factory, both pandas factories report an unusable ``groupby_transformation``
+  with :class:`.UnsupportedDomainError` or :class:`.UnsupportedMetricError` rather
+  than a bare assertion, following the Spark ``count_distinct`` factory. The
+  pandas ``AddNoiseToColumn`` subclasses :class:`.Measurement` directly rather
+  than mirroring ``SparkMeasurement``, since a pandas frame is eager and its noise
+  cannot be redrawn by a later collect; it never modifies the frame it is given,
+  reindexes its output from zero, and casts the noised column explicitly (integral
+  for the geometric and discrete Gaussian mechanisms, floating point for the
+  Laplace and Gaussian ones) so that an empty frame comes back with the same dtype
+  a non-empty one would have.
+
+Changed
+~~~~~~~
+
+- The block building an :class:`.AddNoiseToSeries` from a
+  :class:`~tmlt.core.measurements.aggregations.NoiseMechanism` and a noise scale,
+  which was duplicated between
+  :func:`~tmlt.core.measurements.aggregations.create_count_measurement` and
+  :func:`~tmlt.core.measurements.aggregations.create_count_distinct_measurement`,
+  is now a private helper the two call and the pandas factories share. No
+  behavior changed.
 
 .. _v0.19.1:
 

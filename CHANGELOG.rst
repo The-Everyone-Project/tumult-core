@@ -81,6 +81,17 @@ Added
   point column stays a NaN, since there it is a value rather than a missing value. The
   full per-dtype mapping is documented on
   :mod:`tmlt.core.transformations.pandas_transformations.map`.
+- Added :mod:`tmlt.core.transformations.pandas_transformations.truncation`, holding
+  :class:`~tmlt.core.transformations.pandas_transformations.truncation.LimitRowsPerGroup`,
+  :class:`~tmlt.core.transformations.pandas_transformations.truncation.LimitKeysPerGroup`
+  and
+  :class:`~tmlt.core.transformations.pandas_transformations.truncation.LimitRowsPerKeyPerGroup`
+  over :class:`.PandasTableDomain`. Each takes the same arguments as its counterpart in
+  :mod:`tmlt.core.transformations.spark_transformations.truncation`, rejects the same
+  ones with the same errors, and has the same stability function; the truncation itself
+  is :mod:`tmlt.core.utils.pandas_truncation`, so the two backends keep the same rows.
+  As with the other pandas transformations, the frame they are given is not modified,
+  and the surviving rows are returned in the order they arrived in, reindexed from 0.
 
 .. _v0.19.1:
 

@@ -1300,3 +1300,89 @@ class PandasGroupedTableDomain(Domain):
         if not self._schema:
             return ""
         return format_labeled_siblings(self._schema.items())
+
+
+class PandasRowDomain(Domain):
+    """Domain of pandas DataFrame rows.
+
+    This is the pandas counterpart of
+    :class:`~tmlt.core.domains.spark_domains.SparkRowDomain`, and exists for the
+    same reason: it is the domain of the row transformers that
+    :class:`~tmlt.core.transformations.pandas_transformations.map.Map` applies
+    to a :class:`PandasTableDomain`'s frames one row at a time.
+
+    Carrier:
+        A row is a plain :class:`dict` from column name to value, where a Spark
+        row is a :class:`~pyspark.sql.Row`. pandas has no row object of its own
+        -- a row taken out of a DataFrame is a :class:`~pandas.Series`, which
+        has one dtype for the whole row and so cannot hold a row of mixed
+        types without turning every value into an object -- and a dict is what
+        a user function most naturally writes.
+
+    Nulls:
+        Whatever a column's dtype uses to mark a missing value, a row's value
+        for it is ``None``: never ``NaN``, ``NaT`` or ``pd.NA``. A ``NaN`` in a
+        row is therefore a NaN, exactly as it is in a
+        :class:`PandasFloatColumnDescriptor`'s column. The full mapping, and
+        which side of it each descriptor sits on, is documented on
+        :class:`~tmlt.core.transformations.pandas_transformations.map.Map`,
+        which is what builds these rows.
+
+    Note:
+        Like :class:`~tmlt.core.domains.spark_domains.SparkRowDomain`, this
+        domain does not implement :meth:`validate`; use
+        :meth:`PandasColumnDescriptor.valid_py_value` on a row's values.
+    """
+
+    FORMAT_EXCLUDED_ATTRS = Domain.FORMAT_EXCLUDED_ATTRS | {"schema"}
+
+    @typechecked
+    def __init__(self, schema: PandasTableColumnsDescriptor):
+        """Constructor.
+
+        Args:
+            schema: Mapping from column names to column descriptors.
+        """
+        self._schema = dict(schema.items())
+        # TODO(#2727): Remove this check once we update typeguard to ^3.0.0
+        for key, domain in self._schema.items():
+            if not isinstance(domain, PandasColumnDescriptor):
+                raise TypeError(
+                    f"Expected domain for key '{key}' to be a "
+                    f"{get_fullname(PandasColumnDescriptor)}; got "
+                    f"{get_fullname(domain)} instead"
+                )
+
+    def __repr__(self) -> str:
+        """Return string representation of the object."""
+        return f"{self.__class__.__name__}(schema={self.schema})"
+
+    @property
+    def schema(self) -> PandasTableColumnsDescriptor:
+        """Returns mapping from column names to column descriptors."""
+        return self._schema.copy()
+
+    def validate(self, value: Any) -> None:
+        """Raises error if value is not a row with matching schema."""
+        raise NotImplementedError()
+
+    def __contains__(self, value: Any) -> bool:
+        """Returns True if value is a row with matching schema."""
+        raise NotImplementedError()
+
+    def __eq__(self, other: Any) -> bool:
+        """Return True if the classes are equivalent."""
+        if self.__class__ != other.__class__:
+            return False
+        return OrderedDict(self.schema) == OrderedDict(other.schema)
+
+    @property
+    def carrier_type(self) -> type:
+        """Returns carrier type for members of PandasRowDomain."""
+        return dict
+
+    def _format_children(self) -> str:
+        """Render the column schema as labeled siblings."""
+        if not self._schema:
+            return ""
+        return format_labeled_siblings(self._schema.items())

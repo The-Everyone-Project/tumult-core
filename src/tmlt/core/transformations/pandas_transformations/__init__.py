@@ -19,3 +19,9 @@ from tmlt.core.transformations.pandas_transformations.groupby import (
 from tmlt.core.transformations.pandas_transformations.groupby import (
     create_groupby_from_list_of_keys as create_groupby_from_list_of_keys,
 )
+from tmlt.core.transformations.pandas_transformations.map import Map as Map
+from tmlt.core.transformations.pandas_transformations.map import (
+    RowToRowTransformation as RowToRowTransformation,
+)
+from tmlt.core.transformations.pandas_transformations.rename import Rename as Rename
+from tmlt.core.transformations.pandas_transformations.select import Select as Select

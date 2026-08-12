@@ -202,6 +202,43 @@ def test_output_dtype_table_covers_every_mechanism() -> None:
     assert set(accepted) == set(_NOISE_OUTPUT_DTYPES)
 
 
+def test_output_dtype_of_a_mechanism_subclass() -> None:
+    """A subclass of a mechanism gets its base's output dtype.
+
+    The Spark twin asks the mechanism for its ``output_type``, which a subclass
+    inherits; looking the mechanism's exact type up in the table instead used to
+    raise a bare :class:`KeyError`, and to raise it from ``__call__``, after the
+    noise had been drawn and the budget spent. Nothing is called here: the dtype
+    is settled when the measurement is built.
+    """
+
+    class GeometricSubclass(AddGeometricNoise):
+        """A user's mechanism, deriving from one of the four."""
+
+    measurement = _measurement(GeometricSubclass(alpha=1))
+    assert measurement.output_dtype == np.dtype("int64")
+
+
+def test_mechanism_with_no_output_dtype_is_rejected_at_construction() -> None:
+    """A mechanism the table cannot resolve fails when the measurement is built.
+
+    :class:`~.AddNoiseToSeries` type-checks its mechanism, so this is reached by
+    replacing the mechanism afterwards -- but it is the branch that used to be a
+    :class:`KeyError` raised out of ``__call__``, with the noise already drawn.
+    """
+    measurement = AddNoiseToSeries(AddGeometricNoise(alpha=1))
+    with patch.object(
+        AddNoiseToSeries,
+        "noise_measurement",
+        new_callable=PropertyMock,
+        return_value=object(),
+    ):
+        with pytest.raises(ValueError, match="has no output dtype for noise mechanism"):
+            AddNoiseToColumn(
+                input_domain=_DOMAIN, measurement=measurement, measure_column="count"
+            )
+
+
 ################################################################################
 # Construction, against the Spark twin
 ################################################################################

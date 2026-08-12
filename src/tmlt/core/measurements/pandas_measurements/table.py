@@ -41,6 +41,7 @@ from tmlt.core.measurements.noise_mechanisms import (
 from tmlt.core.measurements.pandas_measurements.series import AddNoiseToSeries
 from tmlt.core.metrics import OnColumn, RootSumOfSquared, SumOf
 from tmlt.core.utils.exact_number import ExactNumber, ExactNumberInput
+from tmlt.core.utils.misc import get_fullname
 
 _NOISE_OUTPUT_DTYPES: dict[type, np.dtype] = {
     AddGeometricNoise: np.dtype("int64"),
@@ -57,7 +58,34 @@ declares as its ``output_type`` -- ``LongType`` and ``DoubleType`` respectively
 of its pandas UDF. Pandas infers a column's dtype from its values instead, and
 infers nothing at all from no values, so the dtype is stated here rather than
 left to inference; see :meth:`AddNoiseToColumn.__call__`.
+
+Lookups go through :func:`_noise_output_dtype`, which matches a mechanism by
+``isinstance`` rather than by exact type, so a subclass of one of these gets
+its base's dtype -- the same answer the Spark twin gets by delegating to the
+mechanism's ``output_type``.
 """
+
+
+def _noise_output_dtype(noise_measurement: Measurement) -> np.dtype:
+    """Returns the dtype a column ``noise_measurement`` noised must end up with.
+
+    Args:
+        noise_measurement: The noise mechanism whose output dtype to resolve.
+
+    Raises:
+        ValueError: If the mechanism is not one of the ones in
+            :data:`_NOISE_OUTPUT_DTYPES`, nor a subclass of one.
+    """
+    for mechanism, dtype in _NOISE_OUTPUT_DTYPES.items():
+        if isinstance(noise_measurement, mechanism):
+            return dtype
+    raise ValueError(
+        "AddNoiseToColumn has no output dtype for noise mechanism"
+        f" {get_fullname(noise_measurement)}. The pandas backend must state the"
+        " dtype of the column a mechanism noised, since pandas infers nothing"
+        " from an empty column, and it knows only"
+        f" {', '.join(sorted(get_fullname(m) for m in _NOISE_OUTPUT_DTYPES))}."
+    )
 
 
 class AddNoiseToColumn(Measurement):
@@ -193,6 +221,9 @@ class AddNoiseToColumn(Measurement):
                 the ``measurement`` adds noise to.
             UnsupportedMetricError: If the ``measurement``'s input metric is
                 neither :class:`~.SumOf` nor :class:`~.RootSumOfSquared`.
+            ValueError: If the dtype the ``measurement``'s noise mechanism
+                leaves its column with is not known; see
+                :data:`_NOISE_OUTPUT_DTYPES`.
         """
         measure_column_domain = input_domain[measure_column].to_numpy_domain()
         if measure_column_domain != measurement.input_domain.element_domain:
@@ -215,6 +246,11 @@ class AddNoiseToColumn(Measurement):
                     f" RootSumOfSquared, not {measurement.input_metric}."
                 ),
             )
+        # Resolved here rather than when the output dtype is asked for, which
+        # is after __call__ has drawn its noise: a measurement that cannot say
+        # what dtype its output column has cannot be built at all, and no
+        # privacy budget is spent finding that out.
+        output_dtype = _noise_output_dtype(measurement.noise_measurement)
         super().__init__(
             input_domain=input_domain,
             input_metric=OnColumn(measure_column, measurement.input_metric),
@@ -223,6 +259,7 @@ class AddNoiseToColumn(Measurement):
         )
         self._measure_column = measure_column
         self._measurement = measurement
+        self._output_dtype = output_dtype
 
     @property
     def input_domain(self) -> PandasTableDomain:
@@ -245,9 +282,10 @@ class AddNoiseToColumn(Measurement):
 
         The discrete mechanisms leave it an ``int64`` column and the continuous
         ones make it a ``float64`` one, matching the Spark type the wrapped
-        mechanism declares as its ``output_type``.
+        mechanism declares as its ``output_type``. It is resolved when the
+        measurement is built, so this cannot fail.
         """
-        return _NOISE_OUTPUT_DTYPES[type(self.measurement.noise_measurement)]
+        return self._output_dtype
 
     @typechecked
     def privacy_function(self, d_in: ExactNumberInput) -> ExactNumber:

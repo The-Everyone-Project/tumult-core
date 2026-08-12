@@ -32,6 +32,7 @@ from tmlt.core.domains.numpy_domains import NumpyFloatDomain, NumpyIntegerDomain
 from tmlt.core.domains.pandas_domains import (
     PandasDataFrameDomain,
     PandasFloatColumnDescriptor,
+    PandasGroupedTableDomain,
     PandasSeriesDomain,
     PandasTableDomain,
 )
@@ -45,7 +46,8 @@ from tmlt.core.utils.exact_number import ExactNumber, ExactNumberInput
 from tmlt.core.utils.format import Formattable, format_labeled_siblings, format_siblings
 from tmlt.core.utils.grouped_dataframe import GroupedDataFrame
 from tmlt.core.utils.misc import ConciseFrozenSet
-from tmlt.core.utils.pandas_grouping import group_indices, row_keys
+from tmlt.core.utils.pandas_grouped_table import PandasGroupedTable, concat_rows
+from tmlt.core.utils.pandas_grouping import distinct_rows, group_indices, row_keys
 from tmlt.core.utils.validation import validate_exact_number
 
 
@@ -596,6 +598,8 @@ class AggregationMetric(ExactNumberMetric):
 
         if isinstance(domain, SparkGroupedDataFrameDomain):
             return self.inner_metric.supports_domain(domain.get_group_domain())
+        if isinstance(domain, PandasGroupedTableDomain):
+            return self.inner_metric.supports_domain(domain.get_group_domain())
         if isinstance(domain, PandasSeriesDomain):
             return self.inner_metric.supports_domain(domain.element_domain)
         if isinstance(domain, ListDomain):
@@ -626,6 +630,25 @@ class AggregationMetric(ExactNumberMetric):
                 [
                     self.inner_metric.distance(groups1[key], groups2[key], group_domain)
                     for key in groups1.keys()
+                ]
+            )
+        elif isinstance(domain, PandasGroupedTableDomain):
+            # help mypy
+            assert isinstance(value1, PandasGroupedTable)
+            assert isinstance(value2, PandasGroupedTable)
+
+            pandas_groups1 = value1.get_groups()
+            pandas_groups2 = value2.get_groups()
+
+            if pandas_groups1.keys() != pandas_groups2.keys():
+                return ExactNumber(sp.oo)
+            pandas_group_domain = domain.get_group_domain()
+            distance = self._aggregate(
+                [
+                    self.inner_metric.distance(
+                        pandas_groups1[key], pandas_groups2[key], pandas_group_domain
+                    )
+                    for key in pandas_groups1.keys()
                 ]
             )
         elif isinstance(domain, PandasSeriesDomain):
@@ -1211,6 +1234,12 @@ class IfGroupedBy(ExactNumberMetric):
         Args:
             domain: The domain to check against.
         """
+        if isinstance(domain, PandasTableDomain):
+            for column in self.columns:
+                if column not in domain.schema:
+                    return False
+            grouped_table_domain = PandasGroupedTableDomain(domain.schema, self.columns)
+            return self.inner_metric.supports_domain(grouped_table_domain)
         if not isinstance(domain, SparkDataFrameDomain):
             return False
         for column in self.columns:
@@ -1228,6 +1257,8 @@ class IfGroupedBy(ExactNumberMetric):
             domain: A domain compatible with the metric.
         """
         self._validate_distance_arguments(value1, value2, domain)
+        if isinstance(domain, PandasTableDomain):
+            return self._pandas_distance(value1, value2, domain)
         # help mypy
         assert isinstance(domain, SparkDataFrameDomain)
 
@@ -1248,6 +1279,47 @@ class IfGroupedBy(ExactNumberMetric):
             GroupedDataFrame(value1, groupby_keys),
             GroupedDataFrame(value2, groupby_keys),
             SparkGroupedDataFrameDomain(domain.schema, self.columns),
+        )
+        self.validate(distance)
+        return distance
+
+    def _pandas_distance(
+        self, value1: pd.DataFrame, value2: pd.DataFrame, domain: PandasTableDomain
+    ) -> ExactNumber:
+        """Returns the distance between two pandas tables.
+
+        This is the pandas branch of :meth:`distance`, split out so that the two
+        backends' branches can be read side by side. It mirrors the Spark branch
+        step for step: the group keys are every key appearing in either table,
+        with :func:`~tmlt.core.utils.pandas_grouping.distinct_rows` taking the
+        place of ``union().distinct()`` so that a null key and a NaN key stay
+        distinct, and the same hardcoded zero covers the case where there are no
+        keys at all.
+
+        Args:
+            value1: An element of the domain.
+            value2: An element of the domain.
+            domain: The domain the two tables belong to.
+        """
+        ordered_groupby_columns = [
+            column for column in domain.schema.keys() if column in self.columns
+        ]
+
+        key_frames = [value[ordered_groupby_columns] for value in (value1, value2)]
+        # Concatenating only the non-empty frames keeps the dtypes of the
+        # groupby columns, which pandas is entitled to change when an empty
+        # frame takes part in a concatenation.
+        nonempty_key_frames = [frame for frame in key_frames if len(frame) > 0]
+        groupby_keys = distinct_rows(concat_rows(nonempty_key_frames or key_frames[:1]))
+        # The Spark branch hardcodes the distance to zero when there are no
+        # groups; this branch does the same, so that two tables that are both
+        # empty are at distance zero under either backend.
+        if len(groupby_keys) == 0:
+            return ExactNumber(0)
+        distance = self._inner_metric.distance(
+            PandasGroupedTable(value1, groupby_keys),
+            PandasGroupedTable(value2, groupby_keys),
+            PandasGroupedTableDomain(domain.schema, self.columns),
         )
         self.validate(distance)
         return distance

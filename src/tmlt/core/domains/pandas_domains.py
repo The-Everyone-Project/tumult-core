@@ -55,7 +55,7 @@ from tmlt.core.domains.numpy_domains import (
     NumpyStringDomain,
 )
 from tmlt.core.utils.format import Formattable, format_labeled_siblings
-from tmlt.core.utils.misc import get_fullname
+from tmlt.core.utils.misc import ConciseFrozenSet, get_fullname
 
 if TYPE_CHECKING:
     from tmlt.core.domains.spark_domains import SparkColumnDescriptor
@@ -1117,3 +1117,186 @@ class PandasTableDomain(Domain):
         return PandasTableDomain(
             {column: domain for column, domain in self.schema.items() if column in cols}
         )
+
+
+class PandasGroupedTableDomain(Domain):
+    """Domain of grouped pandas tables.
+
+    This is the pandas counterpart of
+    :class:`~tmlt.core.domains.spark_domains.SparkGroupedDataFrameDomain`: its
+    carriers are :class:`~tmlt.core.utils.pandas_grouped_table.PandasGroupedTable`
+    objects, whose inner table belongs to the :class:`PandasTableDomain` with
+    this domain's schema and whose group keys belong to that domain projected
+    onto the groupby columns.
+
+    A floating point column cannot be grouped by, as in Spark: the group a row
+    falls into would then depend on a value with no exact representation.
+
+    Example:
+        ..
+            >>> import pandas as pd
+            >>> from tmlt.core.utils.pandas_grouped_table import PandasGroupedTable
+
+        >>> domain = PandasGroupedTableDomain(
+        ...     schema={
+        ...         "A": PandasStringColumnDescriptor(),
+        ...         "B": PandasIntegerColumnDescriptor(),
+        ...     },
+        ...     groupby_columns=["A"],
+        ... )
+        >>> domain.get_group_domain()
+        PandasTableDomain(schema={'B': PandasIntegerColumnDescriptor(allow_null=False, size=64)})
+        >>> table = PandasGroupedTable(
+        ...     dataframe=pd.DataFrame({"A": ["a1", "a2"], "B": [1, 2]}),
+        ...     group_keys=pd.DataFrame({"A": ["a1", "a2"]}),
+        ... )
+        >>> table in domain
+        True
+    """  # noqa: E501
+
+    FORMAT_EXCLUDED_ATTRS = Domain.FORMAT_EXCLUDED_ATTRS | {"schema", "pandas_dtypes"}
+    """Attributes hidden from output when formatting this domain. @nodoc"""
+
+    @typechecked
+    def __init__(
+        self,
+        schema: PandasTableColumnsDescriptor,
+        groupby_columns: Collection[str],
+    ):
+        """Constructor.
+
+        Args:
+            schema: Mapping from column name to column descriptors for all columns.
+            groupby_columns: List of columns used for grouping.
+
+        Raises:
+            ValueError: If ``groupby_columns`` has duplicates, names a column
+                the schema does not have, or names a floating point column.
+        """
+        self._groupby_columns = ConciseFrozenSet(groupby_columns)
+        if len(groupby_columns) != len(self.groupby_columns):
+            raise ValueError("groupby_columns contains duplicate column names.")
+        invalid_groupby_columns = self.groupby_columns - set(schema)
+        if invalid_groupby_columns:
+            raise ValueError(
+                f"Invalid groupby columns: {ConciseFrozenSet(invalid_groupby_columns)}"
+            )
+
+        for column in groupby_columns:
+            if isinstance(schema[column], PandasFloatColumnDescriptor):
+                raise ValueError(f"Can not group by a floating point column: {column}")
+
+        self._schema = dict(schema.items())
+        # TODO(#2727): Remove this check once we update typeguard to ^3.0.0
+        for key, domain in self._schema.items():
+            if not isinstance(domain, PandasColumnDescriptor):
+                raise TypeError(
+                    f"Expected domain for key '{key}' to be a "
+                    f"{get_fullname(PandasColumnDescriptor)}; got "
+                    f"{get_fullname(domain)} instead"
+                )
+
+    @property
+    def schema(self) -> PandasTableColumnsDescriptor:
+        """Returns mapping from column names to column descriptors."""
+        return self._schema.copy()
+
+    @property
+    def groupby_columns(self) -> frozenset[str]:
+        """Returns list of columns used for grouping."""
+        return self._groupby_columns
+
+    def __repr__(self) -> str:
+        """Return string representation of the object."""
+        return (
+            f"{self.__class__.__name__}(schema={self.schema},"
+            f" groupby_columns={self.groupby_columns})"
+        )
+
+    @property
+    def carrier_type(self) -> type:
+        """Returns carrier type for the domain."""
+        # avoid circular import
+        from tmlt.core.utils.pandas_grouped_table import (  # noqa: PLC0415
+            PandasGroupedTable,
+        )
+
+        return PandasGroupedTable
+
+    @property
+    def pandas_dtypes(self) -> Dict[str, PandasDtype]:
+        """Returns the canonical dtype of each column according to the domain.
+
+        Note:
+            As for :attr:`PandasTableDomain.pandas_dtypes`, this is not a
+            complete description of the domain; see that attribute's note.
+        """
+        return {col: desc.pandas_dtype for col, desc in self.schema.items()}
+
+    def validate(self, value: Any) -> None:
+        """Raises error if value is not a PandasGroupedTable with matching keys."""
+        # avoid circular import
+        from tmlt.core.utils.pandas_grouped_table import (  # noqa: PLC0415
+            PandasGroupedTable,
+        )
+
+        super().validate(value)
+        assert isinstance(value, PandasGroupedTable)
+        inner_df_domain = PandasTableDomain(self.schema)
+        try:
+            inner_df_domain.validate(value.dataframe)
+        except OutOfDomainError as exception:
+            raise OutOfDomainError(
+                self, value, f"Invalid inner DataFrame: {exception}"
+            ) from exception
+
+        group_key_domain = PandasTableDomain(
+            {
+                column: desc
+                for column, desc in self.schema.items()
+                if column in self.groupby_columns
+            }
+        )
+        if value.group_keys is None:
+            if group_key_domain.schema:
+                raise OutOfDomainError(
+                    self,
+                    value,
+                    "Invalid group keys: expected groups, but got total aggregation",
+                )
+        else:
+            try:
+                group_key_domain.validate(value.group_keys)
+            except OutOfDomainError as exception:
+                raise OutOfDomainError(
+                    self, value, f"Invalid group keys: {exception}"
+                ) from exception
+
+    def get_group_domain(self) -> PandasTableDomain:
+        """Return the domain for one of the groups."""
+        group_schema = {
+            column: v
+            for column, v in self.schema.items()
+            if column not in self.groupby_columns
+        }
+        return PandasTableDomain(group_schema)
+
+    def __eq__(self, other: Any) -> bool:
+        """Return True if the schemas and group keys are identical."""
+        if self.__class__ != other.__class__:
+            return False
+        if OrderedDict(self.schema) != OrderedDict(other.schema):
+            return False
+        if self.groupby_columns != other.groupby_columns:
+            return False
+        return True
+
+    def __getitem__(self, col_name: str) -> PandasColumnDescriptor:
+        """Returns column descriptor for given column."""
+        return self.schema[col_name]
+
+    def _format_children(self) -> str:
+        """Render the column schema as labeled siblings."""
+        if not self._schema:
+            return ""
+        return format_labeled_siblings(self._schema.items())

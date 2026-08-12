@@ -781,6 +781,16 @@ class TestPandasColumnDescriptors:
             (PandasStringColumnDescriptor(), None, False),
             (PandasStringColumnDescriptor(allow_null=True), None, True),
             (PandasStringColumnDescriptor(allow_null=True), float("nan"), True),
+            # A NaN is a null here whichever type spells it: pandas.Series.isna
+            # makes no distinction, and a numpy float32 is not a Python float
+            # where a numpy float64 is.
+            (PandasStringColumnDescriptor(allow_null=True), np.float32("nan"), True),
+            (PandasStringColumnDescriptor(allow_null=True), np.float64("nan"), True),
+            (PandasStringColumnDescriptor(), np.float32("nan"), False),
+            # ... but in a float column a NaN is a value, whichever type spells
+            # it, so allow_null does not admit one and allow_nan does.
+            (PandasFloatColumnDescriptor(allow_null=True), np.float32("nan"), False),
+            (PandasFloatColumnDescriptor(allow_nan=True), np.float32("nan"), True),
             # Dates, which datetimes are not.
             (PandasDateColumnDescriptor(), _DATE, True),
             (PandasDateColumnDescriptor(), _TIMESTAMP, False),
@@ -799,6 +809,28 @@ class TestPandasColumnDescriptors:
             (PandasTimestampColumnDescriptor(), None, False),
             (PandasTimestampColumnDescriptor(allow_null=True), None, True),
             (PandasTimestampColumnDescriptor(allow_null=True), pd.NaT, True),
+            # A NaT is a datetime.datetime by subclassing, so it takes an
+            # explicit answer rather than falling into the timestamp branch,
+            # which would have accepted it however allow_null was set.
+            (PandasTimestampColumnDescriptor(), pd.NaT, False),
+            (PandasTimestampColumnDescriptor(), np.datetime64("NaT"), False),
+            (
+                PandasTimestampColumnDescriptor(allow_null=True),
+                np.datetime64("NaT"),
+                True,
+            ),
+            # A described column is datetime64[ns], so a value it cannot hold
+            # is not a valid one -- unlike in Spark, whose TimestampType covers
+            # years 1 to 9999.
+            (PandasTimestampColumnDescriptor(), pd.Timestamp.min, True),
+            (PandasTimestampColumnDescriptor(), pd.Timestamp.max, True),
+            (PandasTimestampColumnDescriptor(), datetime.datetime(9999, 12, 31), False),
+            (PandasTimestampColumnDescriptor(), datetime.datetime(1, 1, 1), False),
+            (
+                PandasTimestampColumnDescriptor(allow_null=True),
+                datetime.datetime(9999, 12, 31),
+                False,
+            ),
         ],
     )
     def test_valid_py_value(
@@ -806,6 +838,43 @@ class TestPandasColumnDescriptors:
     ):
         """Tests that valid_py_value works correctly."""
         assert descriptor.valid_py_value(value) == expected
+
+    @pytest.mark.parametrize(
+        "value",
+        [float("nan"), np.float32("nan"), np.float64("nan"), np.datetime64("NaT")],
+        ids=["float-nan", "float32-nan", "float64-nan", "datetime64-nat"],
+    )
+    def test_a_column_and_its_values_agree_about_nulls(self, value: Any):
+        """A column and its own values are called null by the same rule.
+
+        Column validation asks :meth:`pandas.Series.isna`, which makes no
+        distinction between these spellings of a missing value; per-value
+        validation asks ``_is_null``, which used to recognise only some of
+        them. An object column holding a ``numpy.float32`` NaN therefore
+        validated while the very same value, handed to a map function's output
+        row, did not.
+        """
+        frame = _one_column_frame(["a", value], object)
+        nullable = PandasStringColumnDescriptor(allow_null=True)
+        nullable.validate_column(frame, "A")
+        assert nullable.valid_py_value(value)
+
+        not_nullable = PandasStringColumnDescriptor()
+        with pytest.raises(ValueError, match="Column contains null values"):
+            not_nullable.validate_column(frame, "A")
+        assert not not_nullable.valid_py_value(value)
+
+    def test_out_of_range_timestamp_is_not_a_valid_value(self):
+        """A value a datetime64[ns] column cannot hold is out of the domain.
+
+        Without this it passed validation and then failed, as a raw pandas
+        ``OutOfBoundsDatetime``, inside whatever went on to build the column.
+        """
+        descriptor = PandasTimestampColumnDescriptor()
+        too_late = datetime.datetime(9999, 12, 31)
+        assert not descriptor.valid_py_value(too_late)
+        with pytest.raises(pd.errors.OutOfBoundsDatetime):
+            pd.Series([too_late], dtype=descriptor.pandas_dtype)
 
     @pytest.mark.parametrize(
         "descriptor, other_descriptor, expected",

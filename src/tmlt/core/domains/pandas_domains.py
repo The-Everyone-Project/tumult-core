@@ -209,10 +209,21 @@ def _is_null(val: Any) -> bool:
     """Returns True if ``val`` is one of the values pandas treats as null.
 
     This is what :meth:`pandas.Series.isna` reports for an element of an object
-    column: ``None``, ``float("nan")``, ``pd.NA`` and ``pd.NaT`` are all null
-    there. It deliberately takes no view on NaNs inside a *float* column, where
-    a NaN is a NaN rather than a null; see
-    :class:`PandasFloatColumnDescriptor`.
+    column: ``None``, a NaN, ``pd.NA`` and ``NaT`` are all null there. It is the
+    per-value counterpart of :meth:`PandasColumnDescriptor._null_mask`, which
+    answers the same question for a whole column, and the two have to agree
+    about the same value or a column and its rows would validate differently.
+
+    A NaN or a ``NaT`` in *any* of its spellings counts, which is what that
+    agreement requires: ``pandas.Series.isna`` does not care whether a NaN is a
+    :class:`float` or a :class:`numpy.float32` -- which is not a :class:`float`,
+    where a :class:`numpy.float64` is -- nor whether a ``NaT`` is ``pd.NaT`` or
+    a raw ``numpy.datetime64("NaT")``.
+
+    This deliberately takes no view on NaNs inside a *float* column, where a NaN
+    is a NaN rather than a null. That is not this function's business: the float
+    descriptor answers for a NaN itself, and only asks this about values that
+    are not floats at all; see :class:`PandasFloatColumnDescriptor`.
 
     Args:
         val: The value to check.
@@ -221,7 +232,8 @@ def _is_null(val: Any) -> bool:
         val is None
         or val is pd.NA
         or val is pd.NaT
-        or (isinstance(val, float) and math.isnan(val))
+        or (isinstance(val, (float, np.floating)) and math.isnan(val))
+        or (isinstance(val, np.datetime64) and bool(np.isnat(val)))
     )
 
 
@@ -890,6 +902,17 @@ class PandasTimestampColumnDescriptor(PandasColumnDescriptor):
         depend on a timezone that a naive column, and Spark's ``TimestampType``
         as Core uses it, do not carry; the error says how to convert one.
 
+    Range of representable values:
+        Between :attr:`pandas.Timestamp.min` and :attr:`pandas.Timestamp.max`,
+        which is roughly the years 1678 to 2262 -- the range a ``datetime64[ns]``
+        column can hold. This is narrower than Spark's ``TimestampType``, which
+        covers years 1 to 9999, and it is a limit of this engine rather than a
+        choice: a described column's canonical dtype is ``datetime64[ns]``, and
+        a value outside the range cannot be put in one. A
+        :class:`datetime.datetime` outside it is therefore not a valid value,
+        and :meth:`valid_py_value` says so, rather than letting an operation
+        that builds a column fail later with a ``pandas`` ``OutOfBoundsDatetime``.
+
     Example:
         ..
             >>> import pandas as pd
@@ -909,6 +932,9 @@ class PandasTimestampColumnDescriptor(PandasColumnDescriptor):
 
     UNITS: ClassVar = ("s", "ms", "us", "ns")
     """The ``datetime64`` units a described column may use."""
+
+    MIN_MAX: ClassVar = (pd.Timestamp.min, pd.Timestamp.max)
+    """The smallest and largest value a described column can hold."""
 
     allow_null: bool = False
     """If True, null values are permitted in the domain."""
@@ -951,11 +977,22 @@ class PandasTimestampColumnDescriptor(PandasColumnDescriptor):
 
         Note:
             A timezone-aware :class:`datetime.datetime` is not valid, matching
-            the dtypes a described column may have.
+            the dtypes a described column may have, and neither is one outside
+            :attr:`MIN_MAX`; see this class' documentation.
         """
+        # A NaT is a datetime.datetime by subclassing -- NaTType derives from
+        # it -- so it has to be answered before the isinstance branch below,
+        # which would otherwise call it a valid naive timestamp whatever
+        # allow_null is set to. PandasDateColumnDescriptor keeps a datetime out
+        # of a date column with an exact-type match, for the same reason.
+        if _is_null(val):
+            return self.allow_null
         if isinstance(val, datetime.datetime):
-            return val.tzinfo is None
-        return self.allow_null and _is_null(val)
+            if val.tzinfo is not None:
+                return False
+            min_, max_ = self.MIN_MAX
+            return bool(min_ <= val <= max_)
+        return False
 
     def _validate_dtype(self, column: pd.Series) -> None:
         """Raises error if ``column`` does not have an accepted dtype.

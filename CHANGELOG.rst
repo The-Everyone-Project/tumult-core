@@ -109,6 +109,16 @@ Added
   As with the other pandas transformations, the frame they are given is not modified,
   and the surviving rows are returned in the order they arrived in, reindexed from 0.
 
+Changed
+~~~~~~~
+- Moved :class:`~tmlt.core.transformations.dictionary.TransformValue` from
+  :mod:`tmlt.core.transformations.spark_transformations.add_remove_keys` to
+  :mod:`tmlt.core.transformations.dictionary`. The class only constrains the domains
+  and metrics of a dictionary and of the transformation applied to one of its values,
+  none of which is Spark-specific, so it can be the base class of both backends'
+  wrappers. It is re-exported under its old name, and the Spark wrappers derived from
+  it are unchanged, so nothing that imports it moves.
+
 .. _v0.19.1:
 
 0.19.1 - 2026-06-04

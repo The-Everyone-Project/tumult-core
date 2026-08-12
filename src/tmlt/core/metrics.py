@@ -29,7 +29,11 @@ from typeguard import typechecked
 from tmlt.core.domains.base import Domain
 from tmlt.core.domains.collections import DictDomain, ListDomain
 from tmlt.core.domains.numpy_domains import NumpyFloatDomain, NumpyIntegerDomain
-from tmlt.core.domains.pandas_domains import PandasDataFrameDomain, PandasSeriesDomain
+from tmlt.core.domains.pandas_domains import (
+    PandasDataFrameDomain,
+    PandasSeriesDomain,
+    PandasTableDomain,
+)
 from tmlt.core.domains.spark_domains import (
     SparkDataFrameDomain,
     SparkFloatColumnDescriptor,
@@ -319,6 +323,7 @@ class SymmetricDifference(ExactNumberMetric):
                 SparkDataFrameDomain,
                 PandasDataFrameDomain,
                 PandasSeriesDomain,
+                PandasTableDomain,
                 SparkGroupedDataFrameDomain,
             ),
         )
@@ -338,7 +343,7 @@ class SymmetricDifference(ExactNumberMetric):
             )
             self.validate(distance)
             return distance
-        elif isinstance(domain, PandasDataFrameDomain):
+        elif isinstance(domain, (PandasDataFrameDomain, PandasTableDomain)):
             s1 = Counter(map(tuple, value1.values))
             s2 = Counter(map(tuple, value2.values))
             distance = ExactNumber(sum((s1 - s2).values()) + sum((s2 - s1).values()))
@@ -440,7 +445,13 @@ class HammingDistance(ExactNumberMetric):
             domain: The domain to check against.
         """
         return isinstance(
-            domain, (SparkDataFrameDomain, PandasDataFrameDomain, PandasSeriesDomain)
+            domain,
+            (
+                SparkDataFrameDomain,
+                PandasDataFrameDomain,
+                PandasSeriesDomain,
+                PandasTableDomain,
+            ),
         )
 
     def distance(self, value1: Any, value2: Any, domain: Domain) -> ExactNumber:
@@ -458,7 +469,7 @@ class HammingDistance(ExactNumberMetric):
             distance = ExactNumber(value1.exceptAll(value2).count())
             self.validate(distance)
             return distance
-        elif isinstance(domain, PandasDataFrameDomain):
+        elif isinstance(domain, (PandasDataFrameDomain, PandasTableDomain)):
             s1 = Counter(map(tuple, value1.values))
             s2 = Counter(map(tuple, value2.values))
             if sum(s1.values()) != sum(s2.values()):
@@ -1125,6 +1136,17 @@ class IfGroupedBy(ExactNumberMetric):
         Args:
             domain: The domain to check against.
         """
+        if isinstance(domain, PandasTableDomain):
+            if any(column not in domain.schema for column in self.columns):
+                return False
+            # The Spark branch below asks the inner metric about the *grouped*
+            # domain, which an AggregationMetric answers by asking its own
+            # inner metric about the domain of one group. pandas has no grouped
+            # table domain yet, so the same question is asked one level in.
+            inner: Metric = self.inner_metric
+            if isinstance(inner, AggregationMetric):
+                inner = inner.inner_metric
+            return inner.supports_domain(domain)
         if not isinstance(domain, SparkDataFrameDomain):
             return False
         for column in self.columns:
@@ -1142,6 +1164,10 @@ class IfGroupedBy(ExactNumberMetric):
             domain: A domain compatible with the metric.
         """
         self._validate_distance_arguments(value1, value2, domain)
+        if isinstance(domain, PandasTableDomain):
+            raise NotImplementedError(
+                "IfGroupedBy distances are not implemented for pandas tables."
+            )
         # help mypy
         assert isinstance(domain, SparkDataFrameDomain)
 

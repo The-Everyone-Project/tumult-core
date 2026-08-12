@@ -38,14 +38,17 @@ test suite), fail if test coverage falls below this percentage."""
 NOJVM_TEST_PATHS = [
     CWD / "test" / "unit" / "utils",
     CWD / "test" / "unit" / "test_backends_harness.py",
+    CWD / "test" / "unit" / "domains",
+    CWD / "test" / "unit" / "transformations" / "pandas_transformations",
 ]
 """Test paths the test-nojvm session runs.
 
 This is the part of the suite with a pandas-capable surface today -- the
-truncation suites and their neighbours, plus the self-tests of the parity
-harness they are written against. It will grow as more of the pandas backend
-lands; everything under it that still needs Spark is marked and deselected
-rather than excluded by path."""
+truncation suites and their neighbours, the domains, the pandas
+transformations, plus the self-tests of the parity harness they are written
+against. It will grow as more of the pandas backend lands; everything under it
+that still needs Spark is marked and deselected rather than excluded by
+path."""
 
 
 def is_mac():

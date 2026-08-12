@@ -36,6 +36,28 @@ Added
   existing :class:`.PandasSeriesDomain` and :class:`.PandasDataFrameDomain`, which
   describe a DataFrame through the numpy domain of each column's elements, are
   unchanged.
+- Added :mod:`tmlt.core.transformations.pandas_transformations`, holding
+  :class:`~tmlt.core.transformations.pandas_transformations.select.Select`,
+  :class:`~tmlt.core.transformations.pandas_transformations.rename.Rename`,
+  :class:`~tmlt.core.transformations.pandas_transformations.map.Map` and
+  :class:`~tmlt.core.transformations.pandas_transformations.map.RowToRowTransformation`
+  over :class:`.PandasTableDomain`. Each mirrors its counterpart in
+  :mod:`tmlt.core.transformations.spark_transformations`: it takes the same metrics,
+  rejects the same arguments with the same errors, and has the same stability
+  function. The pandas transformations additionally guarantee that they do not modify
+  the frame they are given, and that the rows of their result are in the order they
+  arrived in.
+- Added :class:`.PandasRowDomain`, the domain of the rows
+  :class:`~tmlt.core.transformations.pandas_transformations.map.Map` applies a function
+  to. A row is a :class:`dict`, and a missing value in one is ``None`` whatever marker
+  its column stores -- ``pd.NA``, ``NaT``, or ``None`` -- while a NaN in a floating
+  point column stays a NaN, since there it is a value rather than a missing value. The
+  full per-dtype mapping is documented on
+  :mod:`tmlt.core.transformations.pandas_transformations.map`.
+- :class:`.SymmetricDifference`, :class:`.HammingDistance` and :class:`.IfGroupedBy`
+  now support :class:`.PandasTableDomain`, which is what lets a transformation over
+  one be constructed at all. ``distance`` is implemented for the first two;
+  :class:`.IfGroupedBy` supports the domain but cannot yet measure a distance over it.
 
 .. _v0.19.1:
 

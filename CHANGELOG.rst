@@ -169,9 +169,14 @@ Fixed
 - Importing :mod:`tmlt.core.utils.cleanup` no longer starts a JVM at interpreter
   exit. Its ``atexit`` hook asked for a Spark session with ``getOrCreate``, which
   built one -- JVM included -- in any process that had not already made one, purely
-  to drop a temporary database that such a process cannot have created. It now uses
-  the active session and returns when there is none. Nothing changes for a process
-  that does use Spark.
+  to drop a temporary database that such a process cannot have created. It now
+  looks for a session the process already has, and returns when there is none.
+  A process that does use Spark still has its temporary database dropped, but
+  one detail of *how* the session is found changed: the hook takes the calling
+  thread's active session if there is one and the process' instantiated session
+  otherwise, rather than building a session. That fallback matters because the
+  active session is thread-scoped while the hook runs on the main thread, so a
+  session built on a worker thread is not found by the first lookup alone.
 
 .. _v0.19.1:
 

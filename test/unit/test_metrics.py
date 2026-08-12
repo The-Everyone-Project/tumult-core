@@ -2811,11 +2811,15 @@ class TestPandasTableDomainSupport:
         )
         assert not AddRemoveKeys({"a": "K", "b": "K"}).supports_domain(domain)
 
-    def test_add_remove_keys_distance_is_not_implemented(self):
-        """Measuring a distance between pandas dictionaries is still pending."""
+    def test_add_remove_keys_distance_over_pandas_tables(self):
+        """A dictionary of pandas tables measures a distance of zero to itself.
+
+        The full cross-backend distance parity for :class:`AddRemoveKeys` over
+        pandas tables lives in ``test_pandas_metrics.py``; this pins only that
+        the pandas branch is wired in at all.
+        """
         domain = DictDomain(
             {"a": PandasTableDomain({"K": PandasStringColumnDescriptor()})}
         )
         value = {"a": pd.DataFrame({"K": ["k1"]})}
-        with pytest.raises(NotImplementedError, match="pandas tables"):
-            AddRemoveKeys({"a": "K"}).distance(value, value, domain)
+        assert AddRemoveKeys({"a": "K"}).distance(value, value, domain) == 0

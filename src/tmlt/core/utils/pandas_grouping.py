@@ -10,7 +10,7 @@ component owing its Spark counterpart the same answer -- the truncation
 utilities in :mod:`tmlt.core.utils.pandas_truncation`, and the metrics,
 tables and joins built alongside them -- groups values identically.
 
-:func:`_group_key` is the specification: it maps a value to the key Spark
+``_group_key`` is the specification: it maps a value to the key Spark
 groups and orders it by, and its docstring enumerates the divergences in
 full, the sign of zero included (there pandas already agrees, and it is the
 hashing layer that does not). Everything else here computes that same
@@ -46,7 +46,7 @@ Performance:
     Values are compared once per *distinct* value of a column, so grouping
     cost scales with column cardinality rather than row count. The dtypes
     with no vectorized branch fall back to building one
-    :func:`_group_key` per row, which is a Python-level pass over the column.
+    ``_group_key`` per row, which is a Python-level pass over the column.
 """
 
 # SPDX-License-Identifier: Apache-2.0

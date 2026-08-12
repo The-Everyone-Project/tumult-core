@@ -17,8 +17,9 @@ both are stated as contracts here rather than left to pandas:
 * **What order they come out in.** The output is ordered by the *group keys*,
   which are public, and by nothing else. Two inputs that differ only in the
   order of their rows produce byte-identical output, so row order carries no
-  information about the data; :func:`row_keys` and the group-key frame decide
-  it entirely.
+  information about the data;
+  :func:`~tmlt.core.utils.pandas_grouping.row_keys` and the group-key frame
+  decide it entirely.
 
 Grouping is delegated to :mod:`tmlt.core.utils.pandas_grouping`, so two rows
 belong to the same group here exactly when Spark would put them in one: a null

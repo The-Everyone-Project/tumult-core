@@ -159,10 +159,11 @@ from tmlt.core.transformations.spark_transformations.truncation import (
 
 
 class LimitRowsPerGroupValue(TransformValue):
-    """Applies a :class:`~.LimitRowsPerGroup` to the specified key.
+    """Applies a ``LimitRowsPerGroup`` to the specified key.
 
-    See :class:`~.TransformValue` and :class:`~.LimitRowsPerGroup` for more
-    information.
+    See :class:`~.TransformValue` and
+    :class:`~tmlt.core.transformations.spark_transformations.truncation.LimitRowsPerGroup`
+    for more information.
     """
 
     @typechecked
@@ -196,10 +197,11 @@ class LimitRowsPerGroupValue(TransformValue):
 
 
 class LimitKeysPerGroupValue(TransformValue):
-    """Applies a :class:`~.LimitKeysPerGroup` to the specified key.
+    """Applies a ``LimitKeysPerGroup`` to the specified key.
 
-    See :class:`~.TransformValue` and :class:`~.LimitKeysPerGroup` for more
-    information.
+    See :class:`~.TransformValue` and
+    :class:`~tmlt.core.transformations.spark_transformations.truncation.LimitKeysPerGroup`
+    for more information.
     """
 
     @typechecked
@@ -236,10 +238,11 @@ class LimitKeysPerGroupValue(TransformValue):
 
 
 class LimitRowsPerKeyPerGroupValue(TransformValue):
-    """Applies a :class:`~.LimitRowsPerKeyPerGroup` to the specified key.
+    """Applies a ``LimitRowsPerKeyPerGroup`` to the specified key.
 
-    See :class:`~.TransformValue` and :class:`~.LimitRowsPerKeyPerGroup` for more
-    information.
+    See :class:`~.TransformValue` and
+    :class:`~tmlt.core.transformations.spark_transformations.truncation.LimitRowsPerKeyPerGroup`
+    for more information.
     """
 
     @typechecked
@@ -443,9 +446,11 @@ class FlatMapValue(TransformValue):
 
 
 class MapValue(TransformValue):
-    """Applies a :class:`~.Map` to create a new element from specified value.
+    """Applies a ``Map`` to create a new element from specified value.
 
-    See :class:`~.TransformValue`, and :class:`~.Map` for more information.
+    See :class:`~.TransformValue`, and
+    :class:`~tmlt.core.transformations.spark_transformations.map.Map` for more
+    information.
     """
 
     @typechecked
@@ -798,9 +803,11 @@ class SparkActionValue(TransformValue):
 
 
 class RenameValue(TransformValue):
-    """Applies a :class:`~.Rename` to create a new element from specified value.
+    """Applies a ``Rename`` to create a new element from specified value.
 
-    See :class:`~.TransformValue`, and :class:`~.Rename` for more information.
+    See :class:`~.TransformValue`, and
+    :class:`~tmlt.core.transformations.spark_transformations.rename.Rename` for
+    more information.
     """
 
     @typechecked
@@ -835,9 +842,11 @@ class RenameValue(TransformValue):
 
 
 class SelectValue(TransformValue):
-    """Applies a :class:`~.Select` to create a new element from specified value.
+    """Applies a ``Select`` to create a new element from specified value.
 
-    See :class:`~.TransformValue`, and :class:`~.Select` for more information.
+    See :class:`~.TransformValue`, and
+    :class:`~tmlt.core.transformations.spark_transformations.select.Select` for
+    more information.
     """
 
     @typechecked

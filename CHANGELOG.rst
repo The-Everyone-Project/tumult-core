@@ -36,6 +36,20 @@ Added
   existing :class:`.PandasSeriesDomain` and :class:`.PandasDataFrameDomain`, which
   describe a DataFrame through the numpy domain of each column's elements, are
   unchanged.
+- Added the pandas grouped-table stack, the counterpart of the Spark one: a
+  :class:`.PandasGroupedTable` in :mod:`tmlt.core.utils.pandas_grouped_table`, holding
+  a frame together with an explicit frame of public group keys; a
+  :class:`.PandasGroupedTableDomain` describing one; branches in
+  :class:`.IfGroupedBy`, :class:`.SumOf` and :class:`.RootSumOfSquared` for the two new
+  domains; and :mod:`tmlt.core.transformations.pandas_transformations`, with
+  :class:`~tmlt.core.transformations.pandas_transformations.groupby.GroupBy` (and its
+  two constructor helpers) and the :class:`.CountGrouped` and
+  :class:`.CountDistinctGrouped` aggregations. As in the Spark implementation, an
+  aggregation produces exactly one row per declared group key, filling the keys with no
+  rows and dropping the groups that were not declared; unlike it, the output is ordered
+  by the group keys, so that an input's row order cannot be observed through its
+  output's. Grouping goes through :mod:`tmlt.core.utils.pandas_grouping`, so the two
+  backends agree about which rows share a group.
 
 .. _v0.19.1:
 

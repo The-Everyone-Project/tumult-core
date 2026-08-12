@@ -37,7 +37,10 @@ test suite), fail if test coverage falls below this percentage."""
 
 NOJVM_TEST_PATHS = [
     CWD / "test" / "unit" / "utils",
+    CWD / "test" / "unit" / "domains",
+    CWD / "test" / "unit" / "transformations" / "pandas_transformations",
     CWD / "test" / "unit" / "test_backends_harness.py",
+    CWD / "test" / "unit" / "test_metrics_pandas_grouped.py",
 ]
 """Test paths the test-nojvm session runs.
 

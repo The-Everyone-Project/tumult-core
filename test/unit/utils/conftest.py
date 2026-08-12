@@ -12,7 +12,7 @@ from test.unit.utils.truncation_testing import (
 import pytest
 
 
-@pytest.fixture(params=["spark", "pandas"])
+@pytest.fixture(params=[pytest.param("spark", marks=pytest.mark.spark), "pandas"])
 def backend(request: pytest.FixtureRequest) -> TruncationBackend:
     """Returns each of the two truncation implementations in turn.
 

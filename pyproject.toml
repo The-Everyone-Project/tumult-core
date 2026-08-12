@@ -177,7 +177,10 @@ archs = ["x86_64"]
 # Test configuration
 
 [tool.pytest.ini_options]
-markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
+markers = [
+  "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+  "spark: marks tests that need a Spark session (deselect with '-m \"not spark\"')",
+]
 
 [tool.coverage.run]
 omit = ["**/core/ext/*"]

@@ -129,6 +129,18 @@ Added
   for the geometric and discrete Gaussian mechanisms, floating point for the
   Laplace and Gaussian ones) so that an empty frame comes back with the same dtype
   a non-empty one would have.
+- Added :mod:`tmlt.core.transformations.pandas_transformations.add_remove_keys`, the
+  pandas counterpart of
+  :mod:`tmlt.core.transformations.spark_transformations.add_remove_keys`: the
+  ``LimitRowsPerGroupValue``, ``LimitKeysPerGroupValue``,
+  ``LimitRowsPerKeyPerGroupValue``, ``MapValue``, ``RenameValue`` and ``SelectValue``
+  wrappers, which apply one pandas transformation to one table of a dictionary under
+  :class:`.AddRemoveKeys` and augment the dictionary with the result. Each takes the
+  same arguments as the Spark wrapper of the same name, rejects the same ones with
+  the same errors, and has the same stability function. The wrappers for the
+  operations the pandas backend has no transformation for -- filtering, public joins,
+  flat maps, and dropping or replacing nulls, NaNs and infinities -- and the ones
+  wrapping Spark's persistence machinery have no counterpart here.
 
 Changed
 ~~~~~~~
@@ -140,6 +152,13 @@ Changed
   :func:`~tmlt.core.measurements.aggregations.create_count_distinct_measurement`,
   is now a private helper the two call and the pandas factories share. No
   behavior changed.
+- Moved :class:`~tmlt.core.transformations.dictionary.TransformValue` from
+  :mod:`tmlt.core.transformations.spark_transformations.add_remove_keys` to
+  :mod:`tmlt.core.transformations.dictionary`. The class only constrains the domains
+  and metrics of a dictionary and of the transformation applied to one of its values,
+  none of which is Spark-specific, so it can be the base class of both backends'
+  wrappers. It is re-exported under its old name, and the Spark wrappers derived from
+  it are unchanged, so nothing that imports it moves.
 
 .. _v0.19.1:
 

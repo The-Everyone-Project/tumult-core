@@ -23,5 +23,11 @@ from tmlt.core.transformations.pandas_transformations.map import Map as Map
 from tmlt.core.transformations.pandas_transformations.map import (
     RowToRowTransformation as RowToRowTransformation,
 )
+from tmlt.core.transformations.pandas_transformations.join import (
+    PrivateJoin as PrivateJoin,
+)
+from tmlt.core.transformations.pandas_transformations.join import (
+    PrivateJoinOnKey as PrivateJoinOnKey,
+)
 from tmlt.core.transformations.pandas_transformations.rename import Rename as Rename
 from tmlt.core.transformations.pandas_transformations.select import Select as Select

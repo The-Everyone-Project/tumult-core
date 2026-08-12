@@ -46,7 +46,8 @@ NOJVM_TEST_PATHS = [
 """Test paths the test-nojvm session runs.
 
 This is the part of the suite with a pandas-capable surface today -- the
-truncation suites and their neighbours, the domains, the pandas
+truncation, grouping and join utilities and their neighbours, the domains,
+the pandas
 transformations, plus the self-tests of the parity harness they are written
 against. It will grow as more of the pandas backend lands; everything under it
 that still needs Spark is marked and deselected rather than excluded by

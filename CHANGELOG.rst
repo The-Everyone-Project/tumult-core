@@ -81,6 +81,22 @@ Added
   point column stays a NaN, since there it is a value rather than a missing value. The
   full per-dtype mapping is documented on
   :mod:`tmlt.core.transformations.pandas_transformations.map`.
+- Added :mod:`tmlt.core.utils.pandas_join`, the pandas counterpart of
+  :mod:`tmlt.core.utils.join` (``join`` and ``domain_after_join``). It reproduces
+  Spark's join semantics, which a pandas ``merge`` does not: a ``NULL`` key never
+  matches another ``NULL`` key unless ``nulls_are_equal`` is set, while a ``NaN`` key
+  always matches a ``NaN`` key (``NaN = NaN`` is true in Spark -- a NaN is a value,
+  not a null) and never matches a ``NULL``. Output columns are also given the dtypes
+  of the domain ``domain_after_join`` computes rather than whatever a merge widens
+  them to, so an integer column that a left or outer join leaves unmatched comes back
+  as ``Int64`` rather than as ``float64``, and values above :math:`2^{53}` survive.
+- Added :mod:`tmlt.core.transformations.pandas_transformations.join`, with
+  :class:`.PrivateJoin` and :class:`.PrivateJoinOnKey` over
+  :class:`.PandasTableDomain`\ s. These mirror their counterparts in
+  :mod:`tmlt.core.transformations.spark_transformations.join`: same constructor
+  checks, same output domain, and the same stability functions. They share that
+  module's ``TruncationStrategy``, which names a strategy and is engine-neutral, and
+  truncate through :mod:`tmlt.core.utils.pandas_truncation`.
 
 .. _v0.19.1:
 

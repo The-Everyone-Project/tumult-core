@@ -26,6 +26,16 @@ Added
   microsecond resolution -- none of which a pandas ``groupby`` or ``drop_duplicates``
   gets right on its own. :mod:`tmlt.core.utils.pandas_truncation` is built on this
   module, which it was extracted from.
+- Added a column-descriptor family to :mod:`tmlt.core.domains.pandas_domains`:
+  :class:`.PandasColumnDescriptor` with an integer, float, string, date, and timestamp
+  subclass, collected in a :class:`.PandasTableDomain`. These describe a pandas
+  DataFrame the way :class:`.SparkDataFrameDomain` describes a Spark one and carry the
+  same information, so that both backends can describe the same table; each descriptor
+  also fixes which dtypes a column it describes may have, since pandas -- unlike Spark
+  -- can hold the same values in a numpy array or in a nullable extension array. The
+  existing :class:`.PandasSeriesDomain` and :class:`.PandasDataFrameDomain`, which
+  describe a DataFrame through the numpy domain of each column's elements, are
+  unchanged.
 
 .. _v0.19.1:
 

@@ -679,6 +679,25 @@ def test_boolean_and_categorical_columns_group() -> None:
     assert distinct_rows(df).dtypes.equals(df.dtypes)
 
 
+def test_a_categorical_missing_entry_is_a_null() -> None:
+    """A categorical's missing entry is a null, not a NaN.
+
+    A categorical stores one as the code ``-1`` and hands it back as
+    ``np.nan``, which everywhere else here is a *value* -- pandas does not
+    allow a NaN to be a category, so there is nothing else it could be. It used
+    to be grouped as a NaN, which put a filled-in join key or payload in a
+    group of its own rather than in the null group, and made a join's
+    ``nulls_are_equal`` inert for a categorical key.
+    """
+    categorical = pd.DataFrame(
+        {"v": pd.Series(["a", None, "b", None], dtype="category")}
+    )
+    objects = pd.DataFrame({"v": pd.Series(["a", None, "b", None], dtype=object)})
+
+    assert list(group_ids(categorical, ["v"])) == [0, 1, 2, 1]
+    assert list(row_keys(categorical)) == list(row_keys(objects))
+
+
 def test_repeated_column_names_group_once() -> None:
     """Naming a column twice groups by it once, as Spark allows."""
     df = pd.DataFrame({"a": [1, 1, 2], "b": [1, 2, 1]})

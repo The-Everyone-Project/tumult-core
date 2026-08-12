@@ -81,6 +81,22 @@ def _is_null(value: Any) -> bool:
     return value is None or value is pd.NA or value is pd.NaT
 
 
+def _missing_is_null(dtype: Any) -> bool:
+    """Returns whether every missing entry of such a column is a null.
+
+    A categorical column stores a missing entry as the code ``-1`` and hands it
+    back as ``np.nan``, which in a float or an object column is a *value* here.
+    There is no other way to spell a missing value in a categorical -- pandas
+    does not allow a NaN to be a category -- so in one of those a NaN is a
+    null, and the null group of a grouping and the ``nulls_are_equal`` of a
+    join both have to see it as one.
+
+    Args:
+        dtype: The dtype to classify.
+    """
+    return isinstance(dtype, pd.CategoricalDtype)
+
+
 def _column_values(column: pd.Series) -> Iterator[Any]:
     """Returns the values of a column, with the precision of its dtype."""
     if column.dtype == np.dtype("float32"):
@@ -89,6 +105,12 @@ def _column_values(column: pd.Series) -> Iterator[Any]:
         return iter(column.to_numpy(dtype=np.float32))
     if isinstance(column.dtype, pd.Float32Dtype):
         return iter(column.array)
+    if _missing_is_null(column.dtype):
+        # Yielded as the None every other dtype's missing entry becomes, so
+        # that _group_key reads it as the null it is rather than as a NaN.
+        values = column.astype(object).to_numpy(dtype=object, copy=True)
+        values[column.isna().to_numpy()] = None
+        return iter(values)
     return iter(column)
 
 

@@ -95,7 +95,12 @@ from tmlt.core.domains.pandas_domains import (
 # code is the only way to guarantee that they stay so.
 from tmlt.core.utils.join import columns_after_join, natural_join_columns
 from tmlt.core.utils.misc import get_nonconflicting_string
-from tmlt.core.utils.pandas_grouping import _is_null, group_codes, row_keys
+from tmlt.core.utils.pandas_grouping import (
+    _is_null,
+    _missing_is_null,
+    group_codes,
+    row_keys,
+)
 
 #: The join types :func:`join` accepts, as
 #: :func:`tmlt.core.utils.join.join` accepts them.
@@ -252,7 +257,9 @@ def _dtype_kind(dtype: PandasDtype) -> str:
     deliberately forgets whether a dtype is nullable, since ``int64`` and
     ``Int64`` hold the same integers and a join produces the second from the
     first, and it forgets a ``datetime64``'s unit, since those denote the same
-    instants at different resolutions.
+    instants at different resolutions. Two join columns whose units differ are
+    brought to one unit before anything is compared; see
+    :func:`_reconciled_units`.
 
     Note:
         An ``object`` column is one kind, whatever it holds: pandas keeps
@@ -287,19 +294,155 @@ def _validate_join_dtypes(
     :func:`_validate_join`, which it has no descriptors to make. See
     :func:`_dtype_kind` for what counts as the same kind.
 
+    Two categorical join columns are held to more than their kind: their
+    categories have to be the same. An output join column takes its values from
+    whichever side contributed the row, which pandas will not do between two
+    categoricals with different categories -- and only for the join types that
+    can take a value from the right frame, so without this a join validated,
+    ran as an inner or left join, and raised a bare ``TypeError`` from inside
+    pandas as an outer or right one.
+
     Args:
         left: The left dataframe.
         right: The right dataframe.
         on: The columns to join on, already known to be in both frames.
     """
     for column in on:
-        left_kind = _dtype_kind(left[column].dtype)
-        right_kind = _dtype_kind(right[column].dtype)
+        left_dtype, right_dtype = left[column].dtype, right[column].dtype
+        left_kind, right_kind = _dtype_kind(left_dtype), _dtype_kind(right_dtype)
         if left_kind != right_kind:
             raise ValueError(
                 f"'{column}' has different data types in left ({left_kind}) and "
                 f"right ({right_kind}) dataframes."
             )
+        if isinstance(left_dtype, pd.CategoricalDtype) and left_dtype != right_dtype:
+            raise ValueError(
+                f"'{column}' is categorical with different categories in left "
+                f"({list(left_dtype.categories)}) and right "
+                f"({list(right_dtype.categories)}) dataframes. Give both columns "
+                "the same categories, or convert them with .astype(object)."
+            )
+
+
+#: The naive ``datetime64`` units pandas supports, coarsest first. Only ``ns``
+#: exists on pandas 1; pandas 2 added the other three.
+_DATETIME64_UNITS = ("s", "ms", "us", "ns")
+
+
+def _datetime64_unit(dtype: PandasDtype) -> Optional[str]:
+    """Returns a naive ``datetime64`` dtype's unit, or None for anything else.
+
+    A unit pandas cannot produce -- ``D``, or a sub-nanosecond one -- is
+    reported as None, so that a column carrying it is left exactly as it is
+    rather than converted on a guess.
+
+    Args:
+        dtype: The dtype to read.
+    """
+    if not isinstance(dtype, np.dtype) or dtype.kind != "M":
+        return None
+    unit = str(np.datetime_data(dtype)[0])
+    return unit if unit in _DATETIME64_UNITS else None
+
+
+def _in_unit(column: pd.Series, unit: str, side: str, name: str) -> pd.Series:
+    """Returns a ``datetime64`` column in ``unit``, or raises if it does not fit.
+
+    Args:
+        column: The column to convert.
+        unit: The ``datetime64`` unit to convert it to, finer than its own.
+        side: Which frame the column came from, for the error message.
+        name: The column's name, for the error message.
+
+    Raises:
+        ValueError: If a value of ``column`` is outside the range ``unit`` can
+            represent.
+    """
+    target = np.dtype(f"datetime64[{unit}]")
+    message = (
+        f"'{name}' cannot be joined on: it is datetime64[{_datetime64_unit(column.dtype)}]"
+        f" in the {side} dataframe, which has to be compared in the finer unit"
+        f" datetime64[{unit}] of the other one, and it holds a value outside the"
+        f" range datetime64[{unit}] can represent."
+    )
+    try:
+        converted = column.astype(target)
+    except (ValueError, OverflowError) as error:
+        # pandas raises OutOfBoundsDatetime, a ValueError, for a value it
+        # cannot widen; numpy would wrap one silently, which the round trip
+        # below is what catches.
+        raise ValueError(message) from error
+    if not converted.astype(column.dtype).equals(column):
+        raise ValueError(message)
+    return converted
+
+
+def _reconciled_units(
+    left: pd.DataFrame, right: pd.DataFrame, on: List[str]
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Returns the two frames with each join column in one ``datetime64`` unit.
+
+    On pandas 2 a ``datetime64`` column may be in seconds, milliseconds,
+    microseconds or nanoseconds, and the two sides of a join need not agree.
+    They denote the same instants, and Spark -- where both sides are a
+    ``TimestampType`` of microseconds -- simply compares them, so the join must
+    too. Everything downstream keys, merges and rebuilds a join column in *one*
+    dtype, and taking the left frame's would silently rewrite the values the
+    right frame alone contributed: a right-only ``12:00:00.500`` came back as
+    ``12:00:00`` against a left column of seconds.
+
+    Both sides are therefore brought to the finer of the two units before
+    anything is compared, which is also the unit the output join column comes
+    back in. Only the join columns are touched, and neither input frame is
+    modified.
+
+    Args:
+        left: The left dataframe.
+        right: The right dataframe.
+        on: The columns to join on, already known to hold the same kind of
+            value on both sides.
+
+    Raises:
+        ValueError: If a value cannot be represented in the finer unit, naming
+            the column and the two units.
+    """
+    replacements: Tuple[Dict[str, pd.Series], Dict[str, pd.Series]] = ({}, {})
+    for column in on:
+        units = (
+            _datetime64_unit(left[column].dtype),
+            _datetime64_unit(right[column].dtype),
+        )
+        if None in units or units[0] == units[1]:
+            continue
+        ranks = tuple(_DATETIME64_UNITS.index(unit) for unit in units)  # type: ignore[arg-type]
+        coarser = 0 if ranks[0] < ranks[1] else 1
+        finer_unit = units[1 - coarser]
+        assert finer_unit is not None
+        frame = (left, right)[coarser]
+        replacements[coarser][column] = _in_unit(
+            frame[column], finer_unit, ("left", "right")[coarser], column
+        )
+    return (
+        _with_columns(left, replacements[0]),
+        _with_columns(right, replacements[1]),
+    )
+
+
+def _with_columns(
+    frame: pd.DataFrame, replacements: Dict[str, pd.Series]
+) -> pd.DataFrame:
+    """Returns a frame with some of its columns replaced, leaving it unmodified.
+
+    Args:
+        frame: The frame to rebuild.
+        replacements: The columns to put in place of the frame's own.
+    """
+    if not replacements:
+        return frame
+    return pd.DataFrame(
+        {name: replacements.get(name, frame[name]) for name in frame.columns},
+        index=frame.index,
+    )
 
 
 ################################################################################
@@ -566,13 +709,16 @@ def _null_mask(column: pd.Series) -> np.ndarray:
     the rows whose group is the null group.
 
     Only the positions ``pandas.Series.isna`` reports -- which over-approximates
-    the nulls, since it also reports NaNs -- are examined one at a time.
+    the nulls, since it also reports NaNs -- are examined one at a time. A
+    column whose every missing entry is a null, such as a categorical one, is
+    not examined at all; see
+    :func:`tmlt.core.utils.pandas_grouping._missing_is_null`.
 
     Args:
         column: The column to inspect.
     """
     missing = column.isna().to_numpy()
-    if not missing.any():
+    if not missing.any() or _missing_is_null(column.dtype):
         return missing
     values = column.to_numpy(dtype=object)
     nulls = np.zeros(len(column), dtype=bool)
@@ -719,7 +865,18 @@ def join(
     canonical dtypes of the domain :func:`domain_after_join` computes for the
     same join, so an output frame is always in its output domain.
 
+    A join column that is a ``datetime64`` in different units on the two sides
+    -- which pandas 2 allows -- is the one exception to "the dtype it went in
+    with": both sides are compared, and the output column comes back, in the
+    *finer* of the two units, so that no value the join keeps is rounded. See
+    :func:`_reconciled_units`.
+
     Neither input is modified, and neither shares mutable state with the result.
+
+    Raises:
+        ValueError: If a join column is missing, holds different kinds of value
+            on the two sides, or holds a value that the finer of its two
+            ``datetime64`` units cannot represent.
 
     Example:
         ..
@@ -755,6 +912,7 @@ def join(
         on = natural_join_columns(left_columns, right_columns)
     _validate_join_columns(left_columns, right_columns, on=on, how=how)
     _validate_join_dtypes(left, right, on)
+    left, right = _reconciled_units(left, right, on)
     ids = {
         column: _join_ids(left[column], right[column], nulls_are_equal) for column in on
     }

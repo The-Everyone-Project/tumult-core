@@ -36,6 +36,7 @@ from tmlt.core.domains.pandas_domains import (
 )
 from tmlt.core.domains.spark_domains import SparkDataFrameDomain
 from tmlt.core.utils.join import domain_after_join as spark_domain_after_join
+from tmlt.core.utils.pandas_grouping import row_keys
 from tmlt.core.utils.pandas_join import domain_after_join, join
 from tmlt.core.utils.testing import Case, parametrize
 
@@ -592,6 +593,160 @@ class TestColumns:
         left = pd.DataFrame({"k": np.array([1], dtype=np.int64)})
         right = pd.DataFrame({"k": pd.array([1], dtype="Int64")})
         assert len(join(left, right, on=["k"], how="inner")) == 1
+
+
+################################################################################
+# Mixed datetime64 units
+################################################################################
+
+_PANDAS_2 = int(pd.__version__.split(".")[0]) >= 2
+
+pandas_2_only = pytest.mark.skipif(
+    not _PANDAS_2, reason="pandas 1 has no datetime64 unit other than nanoseconds"
+)
+
+
+def _timestamps(values: List[str], unit: str) -> pd.Series:
+    """Returns a ``datetime64`` column in a given unit.
+
+    Args:
+        values: The timestamps, as ISO 8601 strings.
+        unit: The ``datetime64`` unit the column is in.
+    """
+    return pd.Series(np.array(values, dtype=f"datetime64[{unit}]"))
+
+
+@pandas_2_only
+@parametrize(Case(how)(how=how) for how in JOIN_TYPES)
+def test_mixed_datetime_units_keep_their_values(how: str) -> None:
+    """Joining across units neither rounds nor rewrites a value.
+
+    The output join column takes its value from whichever side contributed the
+    row, and used to take it in the *left* frame's dtype: a right-only
+    ``12:00:00.500`` came back as ``12:00:00`` against a left column of
+    seconds. Spark compares two ``TimestampType`` columns whatever the frames
+    were built from, so this has to as well.
+
+    Args:
+        how: The join type.
+    """
+    left = pd.DataFrame({"t": _timestamps(["2021-06-01T12:00:00"], "s"), "l": [1]})
+    right = pd.DataFrame({"t": _timestamps(["2021-06-01T12:00:00.500"], "ms"), "r": [2]})
+
+    result = join(left, right, on=["t"], how=how)
+
+    # The finer of the two units, so that neither side's values are rounded.
+    assert result["t"].dtype == np.dtype("datetime64[ms]")
+    expected = {
+        "inner": [],
+        "left": ["2021-06-01T12:00:00.000"],
+        "right": ["2021-06-01T12:00:00.500"],
+        "outer": ["2021-06-01T12:00:00.000", "2021-06-01T12:00:00.500"],
+    }[how]
+    assert list(result["t"]) == [pd.Timestamp(value) for value in expected]
+
+
+@pandas_2_only
+def test_mixed_datetime_units_match_at_the_finer_one() -> None:
+    """Two values equal in the finer unit are one key, and unequal ones are not."""
+    left = pd.DataFrame(
+        {"t": _timestamps(["2021-06-01T12:00:00", "2021-06-02T00:00:00"], "s")}
+    )
+    right = pd.DataFrame(
+        {"t": _timestamps(["2021-06-01T12:00:00.000", "2021-06-02T00:00:00.001"], "ms")}
+    )
+    assert list(join(left, right, on=["t"], how="inner")["t"]) == [
+        pd.Timestamp("2021-06-01T12:00:00")
+    ]
+
+
+@pandas_2_only
+@parametrize(Case("coarse-left")(swap=False), Case("coarse-right")(swap=True))
+def test_datetime_value_outside_the_finer_unit_is_named(swap: bool) -> None:
+    """A value the finer unit cannot hold is reported, not an AssertionError.
+
+    Args:
+        swap: Whether the coarse frame is the right one rather than the left.
+    """
+    coarse = pd.DataFrame({"t": _timestamps(["9999-12-31T00:00:00"], "s")})
+    fine = pd.DataFrame({"t": _timestamps(["2021-06-01T12:00:00"], "ns")})
+    left, right = (fine, coarse) if swap else (coarse, fine)
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "'t' cannot be joined on: it is datetime64[s] in the "
+            f"{'right' if swap else 'left'} dataframe"
+        ),
+    ):
+        join(left, right, on=["t"], how="outer")
+
+
+################################################################################
+# Categorical columns
+################################################################################
+
+
+@parametrize(Case(how)(how=how) for how in JOIN_TYPES)
+def test_categorical_keys_with_different_categories_are_rejected(how: str) -> None:
+    """Two categorical keys must have the same categories, whatever the join type.
+
+    Their kinds are both "category", so this passed validation and then failed
+    -- as a bare ``TypeError`` from inside pandas, and only for the join types
+    that can take a value from the right frame -- while the output key was
+    being built.
+
+    Args:
+        how: The join type.
+    """
+    left = pd.DataFrame(
+        {"k": pd.Series(["a", "b"], dtype=pd.CategoricalDtype(["a", "b"]))}
+    )
+    right = pd.DataFrame(
+        {"k": pd.Series(["a"], dtype=pd.CategoricalDtype(["a", "b", "c"]))}
+    )
+    with pytest.raises(ValueError, match="categorical with different categories"):
+        join(left, right, on=["k"], how=how)
+
+
+def test_categorical_keys_with_reordered_categories_join() -> None:
+    """The categories are a set: listing them in another order is one dtype."""
+    left = pd.DataFrame(
+        {"k": pd.Series(["a", "b"], dtype=pd.CategoricalDtype(["a", "b"])), "l": [1, 2]}
+    )
+    right = pd.DataFrame(
+        {"k": pd.Series(["b", "a"], dtype=pd.CategoricalDtype(["b", "a"])), "r": [3, 4]}
+    )
+    result = join(left, right, on=["k"], how="outer")
+    assert dict(zip(result["k"], result["r"])) == {"a": 4, "b": 3}
+
+
+def test_a_categorical_join_fill_is_a_null() -> None:
+    """An unmatched categorical payload comes back as a null, not as a NaN.
+
+    A categorical has one way to spell a missing entry -- the code ``-1``,
+    which reads back as ``np.nan`` -- so that is what a null in one is. The
+    grouping this module joins by used to call it a NaN, which here is a
+    *value*, and gave it a group of its own rather than the null group.
+    """
+    left = pd.DataFrame({"k": [1, 2], "p": pd.Series(["a", "b"], dtype="category")})
+    right = pd.DataFrame({"k": [1, 3], "r": [9, 9]})
+
+    result = join(left, right, on=["k"], how="outer")
+
+    assert result["p"].isna().tolist() == [False, False, True]
+    explicit = pd.DataFrame({"p": pd.Series(["a", "b", None], dtype="category")})
+    assert list(row_keys(result, ["p"])) == list(row_keys(explicit, ["p"]))
+
+
+def test_nulls_are_equal_applies_to_a_categorical_key() -> None:
+    """A missing categorical key is a null, so ``nulls_are_equal`` governs it."""
+    left = pd.DataFrame({"k": pd.Series(["a", None], dtype="category"), "l": [1, 2]})
+    right = pd.DataFrame({"k": pd.Series(["a", None], dtype="category"), "r": [3, 4]})
+    assert list(join(left, right, on=["k"], how="inner")["l"]) == [1]
+    assert list(join(left, right, on=["k"], how="inner", nulls_are_equal=True)["l"]) == [
+        1,
+        2,
+    ]
 
 
 ################################################################################

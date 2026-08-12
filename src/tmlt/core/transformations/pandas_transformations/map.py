@@ -124,6 +124,7 @@ from tmlt.core.metrics import (
 )
 from tmlt.core.transformations.base import Transformation
 from tmlt.core.utils.exact_number import ExactNumber, ExactNumberInput
+from tmlt.core.utils.misc import get_fullname
 
 
 def _assert_row_matches_domain(row: Dict[str, Any], domain: PandasRowDomain) -> None:
@@ -430,9 +431,25 @@ class RowToRowTransformation(Transformation):
 
         Args:
             row: The row to map.
+
+        Raises:
+            OutOfDomainError: If ``trusted_f`` returns anything other than a
+                :class:`dict`.
         """
         mapped_row = self._trusted_f(row)
-        assert isinstance(mapped_row, dict)
+        # The Spark counterpart asserts this instead, and accepts a
+        # pyspark.sql.Row as well as a dict. This is the error a user porting
+        # such a function hits, so it says what was returned and what is wanted
+        # rather than being a message-less assert that -O strips entirely.
+        if not isinstance(mapped_row, dict):
+            raise OutOfDomainError(
+                self.output_domain,
+                mapped_row,
+                "Transformation function must return a dict mapping column names"
+                f" to values, not a {get_fullname(type(mapped_row))}. A"
+                " pyspark.sql.Row, which the Spark implementation also accepts,"
+                " is not a row here; convert one with .asDict().",
+            )
         assert isinstance(self.output_domain, PandasRowDomain)
         if self._augment:
             expected_map_output_domain = PandasRowDomain(

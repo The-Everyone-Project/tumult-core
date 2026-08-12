@@ -7,6 +7,7 @@ import datetime
 from typing import Any, Callable, Dict
 
 import pytest
+from pyspark.sql import Row as SparkRow
 
 from tmlt.core.domains.pandas_domains import (
     PandasColumnDescriptor,
@@ -223,6 +224,28 @@ def test_augment_overlap():
         augment=True,
     )
     with pytest.raises(OutOfDomainError, match="output row has wrong fields"):
+        transformer({"a": 0})
+
+
+@parametrize(
+    Case("spark-row")(returned=SparkRow(a=1)),
+    Case("tuple")(returned=(1,)),
+    Case("scalar")(returned=1),
+)
+def test_output_that_is_not_a_dict(returned: Any):
+    """A function returning something other than a dict is rejected by name.
+
+    The Spark implementation takes a :class:`~pyspark.sql.Row` as well as a
+    dict, so this is the error a user porting a map function to the pandas
+    backend meets; it has to say what happened rather than be a bare assert.
+    """
+    transformer = RowToRowTransformation(
+        PandasRowDomain({"a": PandasIntegerColumnDescriptor()}),
+        PandasRowDomain({"a": PandasIntegerColumnDescriptor()}),
+        lambda r: returned,
+        augment=False,
+    )
+    with pytest.raises(OutOfDomainError, match="must return a dict mapping column"):
         transformer({"a": 0})
 
 

@@ -19,6 +19,13 @@ Added
   ``Double.toString``/``Float.toString``, and a JVM older than 19 renders some values
   with more digits than the shortest that round-trips, which hashes differently. See
   the module documentation for details.
+- Added :mod:`tmlt.core.utils.pandas_grouping`, which groups pandas dataframes the way
+  Spark groups them (``group_codes``, ``group_ids``, ``row_keys``, ``distinct_rows``,
+  and ``group_indices``). ``NULL`` and ``NaN`` are different groups, ``-0.0`` and
+  ``0.0`` are one, binary values group by content, and timestamps group at Spark's
+  microsecond resolution -- none of which a pandas ``groupby`` or ``drop_duplicates``
+  gets right on its own. :mod:`tmlt.core.utils.pandas_truncation` is built on this
+  module, which it was extracted from.
 
 .. _v0.19.1:
 

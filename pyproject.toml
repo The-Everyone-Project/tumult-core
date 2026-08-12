@@ -14,7 +14,7 @@ license = "Apache-2.0"
 # to PyPI. Contents: upstream main (76d80fb) + pandas_truncation (12acfb2) +
 # the pandas-backend work packages. Upstream PRs are cut from the pr/* branches,
 # never from this branch. Bump N when cutting fork wheels.
-version = "0.19.1+ep.backend.0"
+version = "0.19.1+ep.backend.1"
 
 classifiers = [
   "Development Status :: 4 - Beta",
@@ -138,8 +138,8 @@ style = "semver"
 # The default configuration expect vX.Y.Z, but we haven't been using the 'v' prefix.
 pattern = "^(?P<base>\\d+\\.\\d+\\.\\d+)(-(?P<stage>[a-zA-Z]+)\\.(?P<revision>\\d+))?"
 commit-length = 8
-format-jinja = "0.19.1+ep.backend.0"
-fallback-version = "0.19.1+ep.backend.0"
+format-jinja = "0.19.1+ep.backend.1"
+fallback-version = "0.19.1+ep.backend.1"
 
 [tool.hatch.build.hooks.version]
 path = "src/tmlt/core/_version.py"

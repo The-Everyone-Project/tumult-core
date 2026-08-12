@@ -337,6 +337,7 @@ class SymmetricDifference(ExactNumberMetric):
                 PandasSeriesDomain,
                 PandasTableDomain,
                 SparkGroupedDataFrameDomain,
+                PandasGroupedTableDomain,
             ),
         )
 
@@ -387,6 +388,24 @@ class SymmetricDifference(ExactNumberMetric):
             s2 = Counter(value2)
             distance = ExactNumber(sum((s1 - s2).values()) + sum((s2 - s1).values()))
             self.validate(distance)
+            return distance
+        elif isinstance(domain, PandasGroupedTableDomain):
+            # Mirrors the SparkGroupedDataFrameDomain branch below: the group
+            # keys must agree exactly, and each group whose contents differ
+            # contributes 2 (or 1 when one side of the group is empty).
+            pandas_groups1 = value1.get_groups()
+            pandas_groups2 = value2.get_groups()
+            if pandas_groups1.keys() != pandas_groups2.keys():
+                return ExactNumber(sp.oo)
+            pandas_group_domain = domain.get_group_domain()
+            distance = ExactNumber(0)
+            for key, group1 in pandas_groups1.items():
+                group2 = pandas_groups2[key]
+                if self.distance(group1, group2, pandas_group_domain) > 0:
+                    if len(group1) == 0 or len(group2) == 0:
+                        distance += 1
+                    else:
+                        distance += 2
             return distance
         else:
             assert isinstance(domain, SparkGroupedDataFrameDomain)

@@ -10,9 +10,10 @@ two agree. The differential tests here put the corpus in
 distance; the pandas-only tests cover the branches with no Spark counterpart to
 compare against.
 
-The non-grouped metrics' own pandas branches belong to a parallel work package;
-:mod:`test.unit.pandas_metric_bridge` explains what this suite does until they
-land.
+The non-grouped metrics' pandas branches, which the inner metrics here bottom
+out in, are real: they have their own suites in
+:mod:`test.unit.test_pandas_metrics`, and this suite exercises them through the
+grouped stack.
 """
 
 # SPDX-License-Identifier: Apache-2.0
@@ -29,8 +30,7 @@ from test.unit.pandas_grouped_testing import (
     spark_domain,
     spark_frame,
 )
-from test.unit.pandas_metric_bridge import pandas_metric_support
-from typing import Iterator, List, Tuple, Union
+from typing import List, Tuple, Union
 
 import pandas as pd
 import pytest
@@ -79,13 +79,6 @@ _INNER_METRICS: Tuple[Union[SumOf, RootSumOfSquared, SymmetricDifference], ...] 
 _REPRESENTATIVE_CASES = tuple(
     case for case in GROUPABLE_CASES if case.id in _REPRESENTATIVE_CASE_IDS
 )
-
-
-@pytest.fixture(autouse=True)
-def _pandas_metrics() -> Iterator[None]:
-    """Gives the non-grouped metrics pandas support for every test here."""
-    with pandas_metric_support():
-        yield
 
 
 ################################################################################

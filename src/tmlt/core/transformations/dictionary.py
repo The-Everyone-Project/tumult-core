@@ -6,7 +6,8 @@ Note that while most transformations in this module (:class:`~.CreateDictFromVal
 derived transformations (such as :func:`create_copy_and_transform_value`) support
 :class:`~.AddRemoveKeys`. Instead, use :class:`~.TransformValue`, whose per-backend
 subclasses live in
-:mod:`tmlt.core.transformations.spark_transformations.add_remove_keys`.
+:mod:`tmlt.core.transformations.spark_transformations.add_remove_keys` and
+:mod:`tmlt.core.transformations.pandas_transformations.add_remove_keys`.
 """
 
 # SPDX-License-Identifier: Apache-2.0
@@ -393,7 +394,8 @@ class TransformValue(Transformation):
     to one of the dictionary's values, none of which depends on what kind of dataframe
     the values are. The subclasses that name a particular transformation live with
     that transformation's engine, in
-    :mod:`tmlt.core.transformations.spark_transformations.add_remove_keys`.
+    :mod:`tmlt.core.transformations.spark_transformations.add_remove_keys` and
+    :mod:`tmlt.core.transformations.pandas_transformations.add_remove_keys`.
 
     NOTE: This class cannot be instantiated directly.
     """

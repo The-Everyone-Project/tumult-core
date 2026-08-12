@@ -108,6 +108,18 @@ Added
   is :mod:`tmlt.core.utils.pandas_truncation`, so the two backends keep the same rows.
   As with the other pandas transformations, the frame they are given is not modified,
   and the surviving rows are returned in the order they arrived in, reindexed from 0.
+- Added :mod:`tmlt.core.transformations.pandas_transformations.add_remove_keys`, the
+  pandas counterpart of
+  :mod:`tmlt.core.transformations.spark_transformations.add_remove_keys`: the
+  ``LimitRowsPerGroupValue``, ``LimitKeysPerGroupValue``,
+  ``LimitRowsPerKeyPerGroupValue``, ``MapValue``, ``RenameValue`` and ``SelectValue``
+  wrappers, which apply one pandas transformation to one table of a dictionary under
+  :class:`.AddRemoveKeys` and augment the dictionary with the result. Each takes the
+  same arguments as the Spark wrapper of the same name, rejects the same ones with
+  the same errors, and has the same stability function. The wrappers for the
+  operations the pandas backend has no transformation for -- filtering, public joins,
+  flat maps, and dropping or replacing nulls, NaNs and infinities -- and the ones
+  wrapping Spark's persistence machinery have no counterpart here.
 
 Changed
 ~~~~~~~

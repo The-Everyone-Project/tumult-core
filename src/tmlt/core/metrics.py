@@ -29,7 +29,12 @@ from typeguard import typechecked
 from tmlt.core.domains.base import Domain
 from tmlt.core.domains.collections import DictDomain, ListDomain
 from tmlt.core.domains.numpy_domains import NumpyFloatDomain, NumpyIntegerDomain
-from tmlt.core.domains.pandas_domains import PandasDataFrameDomain, PandasSeriesDomain
+from tmlt.core.domains.pandas_domains import (
+    PandasDataFrameDomain,
+    PandasFloatColumnDescriptor,
+    PandasSeriesDomain,
+    PandasTableDomain,
+)
 from tmlt.core.domains.spark_domains import (
     SparkDataFrameDomain,
     SparkFloatColumnDescriptor,
@@ -40,6 +45,7 @@ from tmlt.core.utils.exact_number import ExactNumber, ExactNumberInput
 from tmlt.core.utils.format import Formattable, format_labeled_siblings, format_siblings
 from tmlt.core.utils.grouped_dataframe import GroupedDataFrame
 from tmlt.core.utils.misc import ConciseFrozenSet
+from tmlt.core.utils.pandas_grouping import group_indices, row_keys
 from tmlt.core.utils.validation import validate_exact_number
 
 
@@ -239,6 +245,14 @@ class SymmetricDifference(ExactNumberMetric):
     each collection as a multiset of items. For non-grouped data, it treats each record
     as an item.
 
+    Both descriptions of a pandas DataFrame are supported:
+    :class:`~tmlt.core.domains.pandas_domains.PandasTableDomain`, the counterpart of
+    :class:`~tmlt.core.domains.spark_domains.SparkDataFrameDomain`, compares rows the
+    way Spark does (see :mod:`tmlt.core.utils.pandas_grouping`), so its distances
+    agree with the Spark ones; the older
+    :class:`~tmlt.core.domains.pandas_domains.PandasDataFrameDomain` compares them
+    with Python tuple equality, under which no two NaNs are ever the same row.
+
     For grouped data there are a few cases:
 
     - If the group keys are different, the distance is infinity
@@ -319,6 +333,7 @@ class SymmetricDifference(ExactNumberMetric):
                 SparkDataFrameDomain,
                 PandasDataFrameDomain,
                 PandasSeriesDomain,
+                PandasTableDomain,
                 SparkGroupedDataFrameDomain,
             ),
         )
@@ -335,6 +350,27 @@ class SymmetricDifference(ExactNumberMetric):
         if isinstance(domain, SparkDataFrameDomain):
             distance = ExactNumber(
                 value1.exceptAll(value2).count() + value2.exceptAll(value1).count()
+            )
+            self.validate(distance)
+            return distance
+        elif isinstance(domain, PandasTableDomain):
+            # Rows are compared by their
+            # :func:`~tmlt.core.utils.pandas_grouping.row_keys`, not by the
+            # ``Counter(map(tuple, value.values))`` of the
+            # PandasDataFrameDomain branch below, which is wrong in two ways
+            # for a table of mixed dtypes: ``.values`` builds one homogeneous
+            # array, so an int64 column beside a float64 one is upcast to
+            # float64 and integers that differ only past 2**53 become one
+            # value; and a tuple holding a NaN never equals itself, so a
+            # NaN-bearing row counts as different from its own copy. Row keys
+            # are per-column and null-safe, and put two rows in one group
+            # exactly when Spark does, which is what makes this branch's
+            # distances equal to the SparkDataFrameDomain branch's.
+            table_counts1 = Counter(row_keys(value1))
+            table_counts2 = Counter(row_keys(value2))
+            distance = ExactNumber(
+                sum((table_counts1 - table_counts2).values())
+                + sum((table_counts2 - table_counts1).values())
             )
             self.validate(distance)
             return distance
@@ -379,6 +415,10 @@ class HammingDistance(ExactNumberMetric):
     This metric is compatible with spark dataframes, pandas dataframes, and pandas
     series. It ignores ordering and, in the case of pandas, indices. That is, it treats
     each collection as a multiset of records.
+
+    As for :class:`SymmetricDifference`, both descriptions of a pandas DataFrame are
+    supported, and only :class:`~tmlt.core.domains.pandas_domains.PandasTableDomain`
+    compares rows the way Spark does.
 
     If the sets are not the same size, the distance is infinity.
 
@@ -440,7 +480,13 @@ class HammingDistance(ExactNumberMetric):
             domain: The domain to check against.
         """
         return isinstance(
-            domain, (SparkDataFrameDomain, PandasDataFrameDomain, PandasSeriesDomain)
+            domain,
+            (
+                SparkDataFrameDomain,
+                PandasDataFrameDomain,
+                PandasSeriesDomain,
+                PandasTableDomain,
+            ),
         )
 
     def distance(self, value1: Any, value2: Any, domain: Domain) -> ExactNumber:
@@ -456,6 +502,21 @@ class HammingDistance(ExactNumberMetric):
             if value1.count() != value2.count():
                 return sp.oo
             distance = ExactNumber(value1.exceptAll(value2).count())
+            self.validate(distance)
+            return distance
+        elif isinstance(domain, PandasTableDomain):
+            # Rows are compared by their
+            # :func:`~tmlt.core.utils.pandas_grouping.row_keys`; see the same
+            # branch of SymmetricDifference.distance for why the
+            # PandasDataFrameDomain branch's row tuples are not reused. The
+            # size mismatch gives the infinity the SparkDataFrameDomain branch
+            # above returns as a bare sympy value; ExactNumber(sp.oo) compares
+            # equal to it and matches this method's return type.
+            table_counts1 = Counter(row_keys(value1))
+            table_counts2 = Counter(row_keys(value2))
+            if sum(table_counts1.values()) != sum(table_counts2.values()):
+                return ExactNumber(sp.oo)
+            distance = ExactNumber(sum((table_counts1 - table_counts2).values()))
             self.validate(distance)
             return distance
         elif isinstance(domain, PandasDataFrameDomain):
@@ -772,6 +833,15 @@ class RootSumOfSquared(AggregationMetric):
 class OnColumn(ExactNumberMetric):
     """The value of a metric applied to a single column treated as a vector.
 
+    The domain may describe a Spark table
+    (:class:`~tmlt.core.domains.spark_domains.SparkDataFrameDomain`) or a pandas one
+    (:class:`~tmlt.core.domains.pandas_domains.PandasTableDomain`); either way the
+    column is handed to :attr:`~.metric` as a :class:`pandas.Series` belonging to the
+    :class:`~tmlt.core.domains.pandas_domains.PandasSeriesDomain` of the column
+    descriptor's numpy domain. A column whose descriptor has no numpy domain -- a
+    nullable integer, a date, or a timestamp, on either backend -- is therefore not
+    supported, and :meth:`supports_domain` raises rather than returning False for one.
+
     Example:
         >>> import pandas as pd
         >>> from pyspark.sql import SparkSession
@@ -847,7 +917,7 @@ class OnColumn(ExactNumberMetric):
             domain: The domain to check against.
         """
         return (
-            isinstance(domain, SparkDataFrameDomain)
+            isinstance(domain, (SparkDataFrameDomain, PandasTableDomain))
             and self.column in domain.schema
             and self.metric.supports_domain(
                 PandasSeriesDomain(domain[self.column].to_numpy_domain())
@@ -863,6 +933,22 @@ class OnColumn(ExactNumberMetric):
             domain: A domain compatible with the metric.
         """
         self._validate_distance_arguments(value1, value2, domain)
+        if isinstance(domain, PandasTableDomain):
+            # The Spark branch below hands the inner metric the column as a
+            # pandas Series with a fresh 0..n-1 index; reading the column out
+            # of a pandas frame gives the same Series, and reindexing it gives
+            # it the same index. The domain ignores an index, but
+            # PandasSeriesDomain.validate reads elements by *label*, so a frame
+            # carrying some other index -- a slice of a larger one, say --
+            # would not validate at all. Reindexing copies nothing the caller
+            # holds: the returned Series is a new object over the same values.
+            distance = self.metric.distance(
+                value1[self.column].reset_index(drop=True),
+                value2[self.column].reset_index(drop=True),
+                PandasSeriesDomain(domain[self.column].to_numpy_domain()),
+            )
+            self.validate(distance)
+            return distance
         # help mypy
         assert isinstance(domain, SparkDataFrameDomain)
 
@@ -971,7 +1057,7 @@ class OnColumns(Metric):
         Args:
             domain: The domain to check against.
         """
-        return isinstance(domain, SparkDataFrameDomain) and all(
+        return isinstance(domain, (SparkDataFrameDomain, PandasTableDomain)) and all(
             (on_column.supports_domain(domain) for on_column in self.on_columns)
         )
 
@@ -987,7 +1073,7 @@ class OnColumns(Metric):
         """
         self._validate_distance_arguments(value1, value2, domain)
         # help mypy
-        assert isinstance(domain, SparkDataFrameDomain)
+        assert isinstance(domain, (SparkDataFrameDomain, PandasTableDomain))
 
         distance = tuple(
             column.distance(value1, value2, domain) for column in self.on_columns
@@ -1353,6 +1439,16 @@ class AddRemoveKeys(Metric):
     the same type for the key column. The key columns for the different dataframes may
     have different names.
 
+    The dictionary's dataframes may all be Spark ones
+    (:class:`~tmlt.core.domains.spark_domains.SparkDataFrameDomain`) or all be pandas
+    ones (:class:`~tmlt.core.domains.pandas_domains.PandasTableDomain`), never a
+    mixture: a key of one backend and a key of the other are values of different
+    Python types that no comparison here relates, so a mixed dictionary would silently
+    report every key as added and removed. :meth:`supports_domain` returns False for
+    one, and :meth:`distance` says so explicitly. Under the pandas domains, keys are
+    compared as :mod:`tmlt.core.utils.pandas_grouping` compares them, which is how
+    Spark compares them, so the distances agree across the two backends.
+
     Examples:
         >>> import pandas as pd
         >>> from pyspark.sql import SparkSession
@@ -1463,6 +1559,50 @@ class AddRemoveKeys(Metric):
         self.validate(value2)
         return ExactNumber(value1) <= ExactNumber(value2)
 
+    def _element_backends(self, domain: DictDomain) -> List[str]:
+        """Returns the names of the backends the element domains are of.
+
+        Every element domain that describes a table contributes its backend's
+        name, once; anything else -- which :meth:`supports_domain` rejects --
+        contributes nothing. More than one name means the dictionary mixes
+        backends, which is not supported; see this class's docstring.
+
+        Args:
+            domain: The dictionary domain to inspect.
+
+        Returns:
+            The backend names, sorted, so that the error message built from
+            them does not depend on the dictionary's order.
+        """
+        backends = set()
+        for element_domain in domain.key_to_domain.values():
+            if isinstance(element_domain, SparkDataFrameDomain):
+                backends.add("Spark")
+            elif isinstance(element_domain, PandasTableDomain):
+                backends.add("pandas")
+        return sorted(backends)
+
+    def _rows_with_key(
+        self, df: pd.DataFrame, groups: Dict[Tuple[Any, ...], Any], key: Tuple[Any, ...]
+    ) -> pd.DataFrame:
+        """Returns the rows of a pandas dataframe holding one key.
+
+        Args:
+            df: The dataframe to select from.
+            groups: The dataframe's groups, as
+                :func:`~tmlt.core.utils.pandas_grouping.group_indices` returns
+                them.
+            key: The key to select, which need not appear in ``df`` at all.
+
+        Returns:
+            The rows whose key column holds ``key``, which is an empty
+            dataframe when the key does not appear.
+        """
+        positions = groups.get(key)
+        # A positional selection, so the returned frame is a copy and the
+        # caller's frame cannot be reached through it.
+        return df.iloc[:0] if positions is None else df.iloc[positions]
+
     def supports_domain(self, domain: Domain) -> bool:
         """Return True if the metric is implemented for the passed domain.
 
@@ -1475,14 +1615,19 @@ class AddRemoveKeys(Metric):
                 set(self.df_to_key_column)
             ):
                 return False
+            if len(self._element_backends(domain)) > 1:
+                return False
             for key, element_domain in domain.key_to_domain.items():
                 id_column = self.df_to_key_column[key]
-                if not isinstance(element_domain, SparkDataFrameDomain):
+                if not isinstance(
+                    element_domain, (SparkDataFrameDomain, PandasTableDomain)
+                ):
                     return False
                 if id_column not in element_domain.schema:
                     return False
                 if isinstance(
-                    element_domain.schema[id_column], SparkFloatColumnDescriptor
+                    element_domain.schema[id_column],
+                    (SparkFloatColumnDescriptor, PandasFloatColumnDescriptor),
                 ):
                     return False
                 if column_descriptor is None:
@@ -1499,9 +1644,67 @@ class AddRemoveKeys(Metric):
             value1: An element of the domain.
             value2: An element of the domain.
             domain: A domain compatible with the metric.
+
+        Raises:
+            tmlt.core.exceptions.UnsupportedCombinationError: If ``domain`` is a
+                dictionary domain mixing Spark and pandas dataframes. This is
+                reported before the generic unsupported-domain error, which
+                would not say what is wrong with it.
         """
+        if isinstance(domain, DictDomain):
+            backends = self._element_backends(domain)
+            if len(backends) > 1:
+                raise UnsupportedCombinationError(
+                    (self, domain),
+                    f"{repr(self)} cannot be applied to a dictionary mixing "
+                    f"{' and '.join(backends)} dataframes: a key of one backend "
+                    "is never equal to a key of the other, so every key would be "
+                    "counted as both added and removed. Convert the dictionary to "
+                    "a single backend first.",
+                )
         self._validate_distance_arguments(value1, value2, domain)
         assert isinstance(domain, DictDomain)
+        if self._element_backends(domain) == ["pandas"]:
+            pandas_keys1: Dict[Any, Any] = {}
+            pandas_keys2: Dict[Any, Any] = {}
+            groups1 = {}
+            groups2 = {}
+            for dict_key in domain.key_to_domain:
+                key_column = self.df_to_key_column[dict_key]
+                # group_indices is the null-safe counterpart of the Spark
+                # branch's select(...).distinct() and its eqNullSafe row
+                # filters below, in one pass: it enumerates the distinct keys
+                # and the positions of each key's rows, comparing values the
+                # way Spark compares them (see
+                # :mod:`tmlt.core.utils.pandas_grouping`). A plain groupby
+                # would instead put a null and a NaN in one group and then
+                # drop it, losing every row with a null key.
+                groups1[dict_key] = group_indices(value1[dict_key], [key_column])
+                groups2[dict_key] = group_indices(value2[dict_key], [key_column])
+                pandas_keys1[dict_key] = set(groups1[dict_key])
+                pandas_keys2[dict_key] = set(groups2[dict_key])
+            value1_keys = reduce(lambda x, y: x | y, pandas_keys1.values())
+            value2_keys = reduce(lambda x, y: x | y, pandas_keys2.values())
+            added_keys = value2_keys - value1_keys
+            removed_keys = value1_keys - value2_keys
+
+            # keys which may have changed
+            for key in value1_keys & value2_keys:
+                for dict_key in domain.key_to_domain:
+                    df1 = self._rows_with_key(value1[dict_key], groups1[dict_key], key)
+                    df2 = self._rows_with_key(value2[dict_key], groups2[dict_key], key)
+                    if (
+                        SymmetricDifference().distance(
+                            df1, df2, domain.key_to_domain[dict_key]
+                        )
+                        > 0
+                    ):
+                        added_keys.add(key)
+                        removed_keys.add(key)
+                        break
+            distance = ExactNumber(len(added_keys) + len(removed_keys))
+            self.validate(distance)
+            return distance
         keys_in_value1_elements = {}
         keys_in_value2_elements = {}
         for dict_key in domain.key_to_domain:

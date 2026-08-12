@@ -106,6 +106,11 @@ The other guarantees:
 * :func:`random_frame` is deterministic in its ``rng``, and only draws values
   that are comparable across backends at all -- see its docstring for the
   constraints, which are part of the contract.
+* :func:`domain_for` is the domain counterpart of :func:`df_for`: one schema
+  spec, two equivalent domains. Its flags default to *permissive*, because a
+  domain is validated against on both arguments of every ``distance`` call and
+  the corpus is deliberately full of nulls, NaNs and infinities. See
+  :mod:`test.unit.backend_testing.domains` for the spec.
 """
 
 # SPDX-License-Identifier: Apache-2.0
@@ -145,7 +150,7 @@ from test.unit.backend_testing.corpus import (
     frame_row_ids,
     spark_df_from_case,
 )
-from test.unit.backend_testing.domains import domain_for
+from test.unit.backend_testing.domains import KIND_NAMES, ColumnSpec, domain_for
 from test.unit.backend_testing.generation import (
     COLUMN_KINDS,
     DEFAULT_DTYPE_MENU,
@@ -166,11 +171,13 @@ __all__ = [
     "EMOJI",
     "E_ACUTE",
     "E_COMBINING_ACUTE",
+    "KIND_NAMES",
     "ROW_ID_COLUMN",
     "SIMPLE_DTYPE_MENU",
     "Backend",
     "BackendLike",
     "ColumnKind",
+    "ColumnSpec",
     "EdgeCase",
     "RandomLike",
     "assert_frames_equal_as_multisets",

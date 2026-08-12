@@ -31,3 +31,12 @@ from tmlt.core.transformations.pandas_transformations.join import (
 )
 from tmlt.core.transformations.pandas_transformations.rename import Rename as Rename
 from tmlt.core.transformations.pandas_transformations.select import Select as Select
+from tmlt.core.transformations.pandas_transformations.truncation import (
+    LimitKeysPerGroup as LimitKeysPerGroup,
+)
+from tmlt.core.transformations.pandas_transformations.truncation import (
+    LimitRowsPerGroup as LimitRowsPerGroup,
+)
+from tmlt.core.transformations.pandas_transformations.truncation import (
+    LimitRowsPerKeyPerGroup as LimitRowsPerKeyPerGroup,
+)

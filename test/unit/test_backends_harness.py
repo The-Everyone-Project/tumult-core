@@ -28,11 +28,13 @@ Spark session, and only it carries the ``spark`` marker.
 # Copyright Tumult Labs 2026
 
 import datetime
+import itertools
 import random
 from contextlib import contextmanager
 from test.unit.backend_testing import (
     BACKEND_NAMES,
     EDGE_CASES,
+    KIND_NAMES,
     ROW_ID_COLUMN,
     SIMPLE_DTYPE_MENU,
     Backend,
@@ -57,15 +59,51 @@ import pytest
 from pyspark.sql import DataFrame
 from pyspark.sql.types import DoubleType, FloatType, LongType
 
+from tmlt.core.domains.pandas_domains import (
+    PandasFloatColumnDescriptor,
+    PandasTableDomain,
+)
+from tmlt.core.domains.spark_domains import SparkDataFrameDomain
 from tmlt.core.utils.testing import Case, parametrize
 
 #: Seed for the generated frames used here. Any seed would do; a fixed one
 #: makes a failure reproducible.
 SEED = 20260812
 
+#: The flags each column kind takes, restated rather than imported from
+#: :mod:`test.unit.backend_testing.domains`: this module is the oracle that
+#: package is judged against, so a flag quietly dropped there has to fail here
+#: instead of moving the oracle with it. Parametrizing over
+#: :data:`~test.unit.backend_testing.KIND_NAMES` means a kind added there
+#: without an entry here fails too.
+_KIND_FLAG_NAMES: Dict[str, Tuple[str, ...]] = {
+    "int32": ("allow_null",),
+    "int64": ("allow_null",),
+    "float32": ("allow_nan", "allow_inf", "allow_null"),
+    "float64": ("allow_nan", "allow_inf", "allow_null"),
+    "string": ("allow_null",),
+    "date": ("allow_null",),
+    "timestamp": ("allow_null",),
+}
+
 ################################################################################
 # Helpers
 ################################################################################
+
+
+def _flag_combinations(names: Sequence[str]) -> List[Dict[str, bool]]:
+    """Returns every assignment of True and False to the given flags.
+
+    Args:
+        names: The flag names.
+
+    Returns:
+        One dictionary per combination.
+    """
+    return [
+        dict(zip(names, values))
+        for values in itertools.product([True, False], repeat=len(names))
+    ]
 
 
 def _frame(dtypes: Dict[str, str], rows: Sequence[Tuple[Any, ...]]) -> pd.DataFrame:
@@ -571,18 +609,104 @@ def test_only_the_spark_backend_carries_a_session(backend: Backend) -> None:
 ################################################################################
 
 
-def test_domain_for_is_not_implemented_yet(backend: Backend) -> None:
-    """:func:`domain_for` raises, and says what it is waiting for.
+def test_domain_for_builds_each_backends_domain(backend: Backend) -> None:
+    """:func:`domain_for` returns the backend's own table domain.
 
-    Its signature is frozen so that suites can be written against it now; its
-    body waits on the pandas domains. A test rather than a comment, so that
-    implementing it without removing this becomes a failure.
+    This replaces the placeholder test that asserted it raised
+    :class:`NotImplementedError` while the pandas domains were in flight.
 
     Args:
         backend: The backend to ask for a domain.
     """
-    with pytest.raises(NotImplementedError, match="placeholder"):
-        domain_for({"a": "int64"}, backend)
+    domain = domain_for({"a": "int64", "b": "string"}, backend)
+    expected_type = (
+        SparkDataFrameDomain if backend.name == "spark" else PandasTableDomain
+    )
+    assert isinstance(domain, expected_type)
+    assert list(domain.schema) == ["a", "b"]
+
+
+@pytest.mark.parametrize("kind", KIND_NAMES)
+def test_domain_for_descriptors_agree_across_backends(kind: str) -> None:
+    """The two backends' descriptors describe the same values, flag for flag.
+
+    :meth:`~tmlt.core.domains.pandas_domains.PandasColumnDescriptor.to_spark_descriptor`
+    is the bridge between the two descriptor families, and this is what makes
+    :func:`domain_for` a *parity* helper rather than two unrelated builders: a
+    pandas domain and a Spark domain built from one spec must not differ in
+    what they admit. Every flag combination of every kind is checked, so a new
+    flag on either family fails here.
+
+    This test needs no Spark session: a Spark domain is a description of a
+    frame, not a frame.
+
+    Args:
+        kind: The column kind to check.
+    """
+    flag_names = _KIND_FLAG_NAMES[kind]
+    for flags in _flag_combinations(flag_names):
+        spec: Tuple[str, Dict[str, bool]] = (kind, flags)
+        pandas_domain = domain_for({"a": spec}, Backend("pandas"))
+        spark_domain = domain_for({"a": spec}, Backend("spark"))
+        assert isinstance(pandas_domain, PandasTableDomain)
+        assert isinstance(spark_domain, SparkDataFrameDomain)
+        assert pandas_domain["a"].to_spark_descriptor() == spark_domain["a"], (
+            f"{kind} with {flags} does not bridge to its Spark descriptor"
+        )
+
+
+def test_domain_for_rejects_unknown_kinds_flags_and_backends() -> None:
+    """A spec that names nothing real is an error, not a surprising domain.
+
+    A dtype spelling that is not a *type* -- ``object``, which may hold strings
+    or dates -- is called out by name rather than lumped in with the typos, so
+    that a test written from a frame's dtypes is told what to write instead.
+    """
+    with pytest.raises(ValueError, match="Unknown column kind 'int65'"):
+        domain_for({"a": "int65"}, Backend("pandas"))
+    with pytest.raises(ValueError, match="'string' or 'date'"):
+        domain_for({"a": "object"}, Backend("pandas"))
+    with pytest.raises(ValueError, match="has no flag"):
+        domain_for({"a": ("string", {"allow_nan": True})}, Backend("pandas"))
+    with pytest.raises(ValueError, match="kind name or a"):
+        domain_for({"a": ("string", "allow_null", True)}, Backend("pandas"))  # type: ignore[dict-item]
+    with pytest.raises(ValueError, match="Unknown backend"):
+        domain_for({"a": "int64"}, Backend("duckdb"))
+
+
+def test_domain_for_flags_default_to_permissive() -> None:
+    """Every flag defaults to True, and an override turns one off.
+
+    The default matters: the corpus is full of nulls, NaNs and infinities, and
+    a domain that rejected them would reject most of it before any operation
+    under test ran.
+    """
+    domain = domain_for({"v": "float64"}, Backend("pandas"))
+    assert isinstance(domain, PandasTableDomain)
+    assert domain["v"] == PandasFloatColumnDescriptor(
+        allow_nan=True, allow_inf=True, allow_null=True, size=64
+    )
+    strict = domain_for({"v": ("float64", {"allow_nan": False})}, Backend("pandas"))
+    assert isinstance(strict, PandasTableDomain)
+    assert strict["v"] == PandasFloatColumnDescriptor(
+        allow_nan=False, allow_inf=True, allow_null=True, size=64
+    )
+
+
+def test_domain_for_accepts_nullable_dtype_spellings() -> None:
+    """``Int64`` and ``int64`` are one kind, as the pandas descriptors are.
+
+    A pandas integer descriptor accepts a column of either dtype, so the two
+    spellings cannot name different domains; accepting both keeps a test from
+    having to know which of them the data happens to use.
+    """
+    for pair in (("int64", "Int64"), ("float32", "Float32")):
+        assert domain_for({"a": pair[0]}, Backend("pandas")) == domain_for(
+            {"a": pair[1]}, Backend("pandas")
+        )
+    assert domain_for({"t": "datetime64[ns]"}, Backend("pandas")) == domain_for(
+        {"t": "timestamp"}, Backend("pandas")
+    )
 
 
 ################################################################################

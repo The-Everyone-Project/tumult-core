@@ -36,6 +36,19 @@ Added
   existing :class:`.PandasSeriesDomain` and :class:`.PandasDataFrameDomain`, which
   describe a DataFrame through the numpy domain of each column's elements, are
   unchanged.
+- The table-level metrics in :mod:`tmlt.core.metrics` -- :class:`.SymmetricDifference`,
+  :class:`.HammingDistance`, :class:`.OnColumn`, :class:`.OnColumns` and
+  :class:`.AddRemoveKeys` -- now accept :class:`.PandasTableDomain` alongside
+  :class:`.SparkDataFrameDomain`, and give the same distance for the same data under
+  either backend. Rows and keys are compared with
+  :mod:`tmlt.core.utils.pandas_grouping`, so a ``NULL`` and a ``NaN`` are different
+  values, ``-0.0`` and ``0.0`` are one, and each column is compared in its own dtype.
+  The branches for the older :class:`.PandasDataFrameDomain` and
+  :class:`.PandasSeriesDomain` are unchanged; note that the former compares whole rows
+  as Python tuples of ``DataFrame.values``, which merges integers differing only past
+  ``2**53`` when a float column is present, and never finds a NaN-bearing row equal to
+  itself. :class:`.AddRemoveKeys` requires a dictionary's dataframes to be all Spark or
+  all pandas, and says so rather than silently reporting every key as changed.
 
 .. _v0.19.1:
 

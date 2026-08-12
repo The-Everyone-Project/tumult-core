@@ -10,6 +10,7 @@ from collections import Counter
 from functools import reduce
 from typing import (
     Any,
+    Callable,
     Collection,
     Dict,
     Iterable,
@@ -389,44 +390,31 @@ class SymmetricDifference(ExactNumberMetric):
             distance = ExactNumber(sum((s1 - s2).values()) + sum((s2 - s1).values()))
             self.validate(distance)
             return distance
-        elif isinstance(domain, PandasGroupedTableDomain):
-            # Mirrors the SparkGroupedDataFrameDomain branch below: the group
-            # keys must agree exactly, and each group whose contents differ
-            # contributes 2 (or 1 when one side of the group is empty).
-            pandas_groups1 = value1.get_groups()
-            pandas_groups2 = value2.get_groups()
-            if pandas_groups1.keys() != pandas_groups2.keys():
-                return ExactNumber(sp.oo)
-            pandas_group_domain = domain.get_group_domain()
-            distance = ExactNumber(0)
-            for key, group1 in pandas_groups1.items():
-                group2 = pandas_groups2[key]
-                if self.distance(group1, group2, pandas_group_domain) > 0:
-                    if len(group1) == 0 or len(group2) == 0:
-                        distance += 1
-                    else:
-                        distance += 2
-            return distance
         else:
-            assert isinstance(domain, SparkGroupedDataFrameDomain)
+            assert isinstance(
+                domain, (PandasGroupedTableDomain, SparkGroupedDataFrameDomain)
+            )
+            # The group keys must agree exactly, and each group whose contents
+            # differ contributes 2 -- or 1 when one side of the group is empty.
+            # That is the whole algorithm for either backend; only asking a
+            # group whether it is empty differs. A pandas group is a frame,
+            # which len() answers for; a Spark group is a plan, and taking one
+            # row is what asks without counting the rest.
+            is_empty: Callable[[Any], bool] = (
+                (lambda group: len(group) == 0)
+                if isinstance(domain, PandasGroupedTableDomain)
+                else (lambda group: len(group.head(1)) == 0)
+            )
             groups1 = value1.get_groups()
             groups2 = value2.get_groups()
             if groups1.keys() != groups2.keys():
                 return ExactNumber(sp.oo)
             group_domain = domain.get_group_domain()
-
-            # If this fails, one of the grouped dataframes isn't part of the domain, and
-            # something should have failed earlier.
-            assert set(groups1.keys()) == set(groups2.keys())
             distance = ExactNumber(0)
-            for key in groups1:
-                df1 = groups1[key]
-                df2 = groups2[key]
-                if self.distance(df1, df2, group_domain) > 0:
-                    if len(df1.head(1)) == 0 or len(df2.head(1)) == 0:
-                        distance += 1
-                    else:
-                        distance += 2
+            for key, group1 in groups1.items():
+                group2 = groups2[key]
+                if self.distance(group1, group2, group_domain) > 0:
+                    distance += 1 if is_empty(group1) or is_empty(group2) else 2
             return distance
 
 
@@ -615,9 +603,7 @@ class AggregationMetric(ExactNumberMetric):
         if not isinstance(self.inner_metric, ExactNumberMetric):
             return False
 
-        if isinstance(domain, SparkGroupedDataFrameDomain):
-            return self.inner_metric.supports_domain(domain.get_group_domain())
-        if isinstance(domain, PandasGroupedTableDomain):
+        if isinstance(domain, (SparkGroupedDataFrameDomain, PandasGroupedTableDomain)):
             return self.inner_metric.supports_domain(domain.get_group_domain())
         if isinstance(domain, PandasSeriesDomain):
             return self.inner_metric.supports_domain(domain.element_domain)
@@ -634,40 +620,22 @@ class AggregationMetric(ExactNumberMetric):
             domain: A domain compatible with the metric.
         """
         self._validate_distance_arguments(value1, value2, domain)
-        if isinstance(domain, SparkGroupedDataFrameDomain):
-            # help mypy
-            assert isinstance(value1, GroupedDataFrame)
-            assert isinstance(value2, GroupedDataFrame)
-
-            groups1 = value1.get_groups()
-            groups2 = value2.get_groups()
-
+        if isinstance(domain, (SparkGroupedDataFrameDomain, PandasGroupedTableDomain)):
+            # A grouped dataframe and a grouped table both hand over a mapping
+            # from group key to that group's rows, and the distance is the
+            # aggregate of the inner metric over the groups either way. The
+            # annotations are what tell mypy the two mappings have one type:
+            # narrowing the *values* with isinstance would leave their key
+            # types to be joined, which they cannot be.
+            groups1: Dict[Any, Any] = value1.get_groups()
+            groups2: Dict[Any, Any] = value2.get_groups()
             if groups1.keys() != groups2.keys():
                 return ExactNumber(sp.oo)
             group_domain = domain.get_group_domain()
             distance = self._aggregate(
                 [
                     self.inner_metric.distance(groups1[key], groups2[key], group_domain)
-                    for key in groups1.keys()
-                ]
-            )
-        elif isinstance(domain, PandasGroupedTableDomain):
-            # help mypy
-            assert isinstance(value1, PandasGroupedTable)
-            assert isinstance(value2, PandasGroupedTable)
-
-            pandas_groups1 = value1.get_groups()
-            pandas_groups2 = value2.get_groups()
-
-            if pandas_groups1.keys() != pandas_groups2.keys():
-                return ExactNumber(sp.oo)
-            pandas_group_domain = domain.get_group_domain()
-            distance = self._aggregate(
-                [
-                    self.inner_metric.distance(
-                        pandas_groups1[key], pandas_groups2[key], pandas_group_domain
-                    )
-                    for key in pandas_groups1.keys()
+                    for key in groups1
                 ]
             )
         elif isinstance(domain, PandasSeriesDomain):
@@ -1742,91 +1710,118 @@ class AddRemoveKeys(Metric):
                 reported before the generic unsupported-domain error, which
                 would not say what is wrong with it.
         """
-        if isinstance(domain, DictDomain):
-            backends = self._element_backends(domain)
-            if len(backends) > 1:
-                raise UnsupportedCombinationError(
-                    (self, domain),
-                    f"{repr(self)} cannot be applied to a dictionary mixing "
-                    f"{' and '.join(backends)} dataframes: a key of one backend "
-                    "is never equal to a key of the other, so every key would be "
-                    "counted as both added and removed. Convert the dictionary to "
-                    "a single backend first.",
-                )
+        # Checked before _validate_distance_arguments so that a mixed
+        # dictionary is reported as such; a domain that is not a DictDomain at
+        # all has no backends and falls through to that generic error.
+        backends = (
+            self._element_backends(domain) if isinstance(domain, DictDomain) else []
+        )
+        if len(backends) > 1:
+            raise UnsupportedCombinationError(
+                (self, domain),
+                f"{repr(self)} cannot be applied to a dictionary mixing "
+                f"{' and '.join(backends)} dataframes: a key of one backend "
+                "is never equal to a key of the other, so every key would be "
+                "counted as both added and removed. Convert the dictionary to "
+                "a single backend first.",
+            )
         self._validate_distance_arguments(value1, value2, domain)
+        # supports_domain accepts nothing but a DictDomain, and the check above
+        # has already run; this is what tells mypy so.
         assert isinstance(domain, DictDomain)
-        if self._element_backends(domain) == ["pandas"]:
-            pandas_keys1: Dict[Any, Any] = {}
-            pandas_keys2: Dict[Any, Any] = {}
-            groups1 = {}
-            groups2 = {}
-            for dict_key in domain.key_to_domain:
-                key_column = self.df_to_key_column[dict_key]
-                # group_indices is the null-safe counterpart of the Spark
-                # branch's select(...).distinct() and its eqNullSafe row
-                # filters below, in one pass: it enumerates the distinct keys
-                # and the positions of each key's rows, comparing values the
-                # way Spark compares them (see
-                # :mod:`tmlt.core.utils.pandas_grouping`). A plain groupby
-                # would instead put a null and a NaN in one group and then
-                # drop it, losing every row with a null key.
-                groups1[dict_key] = group_indices(value1[dict_key], [key_column])
-                groups2[dict_key] = group_indices(value2[dict_key], [key_column])
-                pandas_keys1[dict_key] = set(groups1[dict_key])
-                pandas_keys2[dict_key] = set(groups2[dict_key])
-            value1_keys = reduce(lambda x, y: x | y, pandas_keys1.values())
-            value2_keys = reduce(lambda x, y: x | y, pandas_keys2.values())
-            added_keys = value2_keys - value1_keys
-            removed_keys = value1_keys - value2_keys
 
-            # keys which may have changed
-            for key in value1_keys & value2_keys:
-                for dict_key in domain.key_to_domain:
-                    df1 = self._rows_with_key(value1[dict_key], groups1[dict_key], key)
-                    df2 = self._rows_with_key(value2[dict_key], groups2[dict_key], key)
-                    if (
-                        SymmetricDifference().distance(
-                            df1, df2, domain.key_to_domain[dict_key]
-                        )
-                        > 0
-                    ):
-                        added_keys.add(key)
-                        removed_keys.add(key)
-                        break
-            distance = ExactNumber(len(added_keys) + len(removed_keys))
-            self.validate(distance)
-            return distance
-        keys_in_value1_elements = {}
-        keys_in_value2_elements = {}
+        # One algorithm over two backends. All that differs is how a dataframe's
+        # distinct keys are enumerated and how the rows holding one key are
+        # taken out of it, so those two are bound here and the rest is written
+        # once. The keys stay opaque -- a Spark value or a pandas group key --
+        # and are only ever compared with keys the same backend produced.
+        if backends == ["pandas"]:
+
+            def enumerate_keys(df: Any, key_column: str) -> Dict[Any, Any]:
+                """Returns each distinct key of a frame, with its rows' positions.
+
+                ``group_indices`` is the null-safe counterpart of the Spark
+                branch's ``select(...).distinct()`` and its ``eqNullSafe`` row
+                filters, in one pass: it enumerates the distinct keys and the
+                positions of each key's rows, comparing values the way Spark
+                compares them (see :mod:`tmlt.core.utils.pandas_grouping`). A
+                plain groupby would instead put a null and a NaN in one group
+                and then drop it, losing every row with a null key.
+
+                Args:
+                    df: The dataframe whose keys are wanted.
+                    key_column: The column holding the keys.
+                """
+                return group_indices(df, [key_column])
+
+            def rows_with_key(
+                df: Any, keys: Dict[Any, Any], key_column: str, key: Any
+            ) -> Any:
+                """Returns the rows of a dataframe holding one key.
+
+                Args:
+                    df: The dataframe to select from.
+                    keys: That dataframe's keys, as ``enumerate_keys`` gave them.
+                    key_column: The column holding the keys.
+                    key: The key to select, which need not appear in ``df``.
+                """
+                del key_column  # The positions in `keys` already name it.
+                return self._rows_with_key(df, keys, key)
+
+        else:
+
+            def enumerate_keys(df: Any, key_column: str) -> Dict[Any, Any]:
+                """Returns each distinct key of a dataframe, mapped to nothing.
+
+                A Spark row is selected by filtering, so there is nothing to
+                remember about where a key's rows are.
+
+                Args:
+                    df: The dataframe whose keys are wanted.
+                    key_column: The column holding the keys.
+                """
+                return dict.fromkeys(
+                    df.select(key_column)
+                    .distinct()
+                    .rdd.map(lambda row: row[0])
+                    .collect()
+                )
+
+            def rows_with_key(
+                df: Any, keys: Dict[Any, Any], key_column: str, key: Any
+            ) -> Any:
+                """Returns the rows of a dataframe holding one key.
+
+                Args:
+                    df: The dataframe to select from.
+                    keys: That dataframe's keys, which this backend does not need.
+                    key_column: The column holding the keys.
+                    key: The key to select, which need not appear in ``df``.
+                """
+                del keys
+                return df.filter(sf.col(key_column).eqNullSafe(key))
+
+        keys1: Dict[Any, Dict[Any, Any]] = {}
+        keys2: Dict[Any, Dict[Any, Any]] = {}
+        distinct1: Dict[Any, set] = {}
+        distinct2: Dict[Any, set] = {}
         for dict_key in domain.key_to_domain:
-            keys_in_value1_elements[dict_key] = set(
-                value1[dict_key]
-                .select(self.df_to_key_column[dict_key])
-                .distinct()
-                .rdd.map(lambda x: x[0])
-                .collect()
-            )
-            keys_in_value2_elements[dict_key] = set(
-                value2[dict_key]
-                .select(self.df_to_key_column[dict_key])
-                .distinct()
-                .rdd.map(lambda x: x[0])
-                .collect()
-            )
-        value1_keys = reduce(lambda x, y: x | y, keys_in_value1_elements.values())
-        value2_keys = reduce(lambda x, y: x | y, keys_in_value2_elements.values())
+            key_column = self.df_to_key_column[dict_key]
+            keys1[dict_key] = enumerate_keys(value1[dict_key], key_column)
+            keys2[dict_key] = enumerate_keys(value2[dict_key], key_column)
+            distinct1[dict_key] = set(keys1[dict_key])
+            distinct2[dict_key] = set(keys2[dict_key])
+        value1_keys = reduce(lambda x, y: x | y, distinct1.values())
+        value2_keys = reduce(lambda x, y: x | y, distinct2.values())
         added_keys = value2_keys - value1_keys
         removed_keys = value1_keys - value2_keys
 
         # keys which may have changed
         for key in value1_keys & value2_keys:
             for dict_key in domain.key_to_domain:
-                df1 = value1[dict_key].filter(
-                    sf.col(self.df_to_key_column[dict_key]).eqNullSafe(key)
-                )
-                df2 = value2[dict_key].filter(
-                    sf.col(self.df_to_key_column[dict_key]).eqNullSafe(key)
-                )
+                key_column = self.df_to_key_column[dict_key]
+                df1 = rows_with_key(value1[dict_key], keys1[dict_key], key_column, key)
+                df2 = rows_with_key(value2[dict_key], keys2[dict_key], key_column, key)
                 if (
                     SymmetricDifference().distance(
                         df1, df2, domain.key_to_domain[dict_key]

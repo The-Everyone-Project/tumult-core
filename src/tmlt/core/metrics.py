@@ -29,7 +29,12 @@ from typeguard import typechecked
 from tmlt.core.domains.base import Domain
 from tmlt.core.domains.collections import DictDomain, ListDomain
 from tmlt.core.domains.numpy_domains import NumpyFloatDomain, NumpyIntegerDomain
-from tmlt.core.domains.pandas_domains import PandasDataFrameDomain, PandasSeriesDomain
+from tmlt.core.domains.pandas_domains import (
+    PandasDataFrameDomain,
+    PandasFloatColumnDescriptor,
+    PandasSeriesDomain,
+    PandasTableDomain,
+)
 from tmlt.core.domains.spark_domains import (
     SparkDataFrameDomain,
     SparkFloatColumnDescriptor,
@@ -40,6 +45,7 @@ from tmlt.core.utils.exact_number import ExactNumber, ExactNumberInput
 from tmlt.core.utils.format import Formattable, format_labeled_siblings, format_siblings
 from tmlt.core.utils.grouped_dataframe import GroupedDataFrame
 from tmlt.core.utils.misc import ConciseFrozenSet
+from tmlt.core.utils.pandas_grouping import row_keys
 from tmlt.core.utils.validation import validate_exact_number
 
 
@@ -319,6 +325,7 @@ class SymmetricDifference(ExactNumberMetric):
                 SparkDataFrameDomain,
                 PandasDataFrameDomain,
                 PandasSeriesDomain,
+                PandasTableDomain,
                 SparkGroupedDataFrameDomain,
             ),
         )
@@ -341,6 +348,16 @@ class SymmetricDifference(ExactNumberMetric):
         elif isinstance(domain, PandasDataFrameDomain):
             s1 = Counter(map(tuple, value1.values))
             s2 = Counter(map(tuple, value2.values))
+            distance = ExactNumber(sum((s1 - s2).values()) + sum((s2 - s1).values()))
+            self.validate(distance)
+            return distance
+        elif isinstance(domain, PandasTableDomain):
+            # Rows are keyed by tmlt.core.utils.pandas_grouping, not by tuple:
+            # a PandasTableDomain carrier can hold nulls and NaNs, and a tuple
+            # holding a NaN does not compare equal to an equal tuple, so keying
+            # by tuple would count two identical rows as two different ones.
+            s1 = Counter(row_keys(value1))
+            s2 = Counter(row_keys(value2))
             distance = ExactNumber(sum((s1 - s2).values()) + sum((s2 - s1).values()))
             self.validate(distance)
             return distance
@@ -1477,12 +1494,19 @@ class AddRemoveKeys(Metric):
                 return False
             for key, element_domain in domain.key_to_domain.items():
                 id_column = self.df_to_key_column[key]
-                if not isinstance(element_domain, SparkDataFrameDomain):
+                # A dictionary of pandas tables is supported exactly as one of
+                # Spark dataframes is. A dictionary mixing the two is not, and
+                # is rejected by the key column descriptors below, which never
+                # compare equal across the two families.
+                if not isinstance(
+                    element_domain, (SparkDataFrameDomain, PandasTableDomain)
+                ):
                     return False
                 if id_column not in element_domain.schema:
                     return False
                 if isinstance(
-                    element_domain.schema[id_column], SparkFloatColumnDescriptor
+                    element_domain.schema[id_column],
+                    (SparkFloatColumnDescriptor, PandasFloatColumnDescriptor),
                 ):
                     return False
                 if column_descriptor is None:
@@ -1502,6 +1526,19 @@ class AddRemoveKeys(Metric):
         """
         self._validate_distance_arguments(value1, value2, domain)
         assert isinstance(domain, DictDomain)
+        if any(
+            isinstance(element_domain, PandasTableDomain)
+            for element_domain in domain.key_to_domain.values()
+        ):
+            # supports_domain accepts a dictionary of pandas tables, so that the
+            # transformations in tmlt.core.transformations.pandas_transformations
+            # can be built under this metric; measuring a distance between two
+            # such dictionaries is a separate piece of work, and the body below
+            # is Spark-only (it calls .select and .rdd on its inputs).
+            raise NotImplementedError(
+                "AddRemoveKeys.distance is not implemented for dictionaries of "
+                "pandas tables."
+            )
         keys_in_value1_elements = {}
         keys_in_value2_elements = {}
         for dict_key in domain.key_to_domain:

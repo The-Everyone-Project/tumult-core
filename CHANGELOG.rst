@@ -36,6 +36,34 @@ Added
   existing :class:`.PandasSeriesDomain` and :class:`.PandasDataFrameDomain`, which
   describe a DataFrame through the numpy domain of each column's elements, are
   unchanged.
+- Added :mod:`tmlt.core.utils.pandas_join`, the pandas counterpart of
+  :mod:`tmlt.core.utils.join` (``join`` and ``domain_after_join``). It reproduces
+  Spark's join semantics, which a pandas ``merge`` does not: a ``NULL`` key never
+  matches another ``NULL`` key unless ``nulls_are_equal`` is set, while a ``NaN`` key
+  always matches a ``NaN`` key (``NaN = NaN`` is true in Spark -- a NaN is a value,
+  not a null) and never matches a ``NULL``. Output columns are also given the dtypes
+  of the domain ``domain_after_join`` computes rather than whatever a merge widens
+  them to, so an integer column that a left or outer join leaves unmatched comes back
+  as ``Int64`` rather than as ``float64``, and values above :math:`2^{53}` survive.
+- Added :mod:`tmlt.core.transformations.pandas_transformations.join`, with
+  :class:`.PrivateJoin` and :class:`.PrivateJoinOnKey` over
+  :class:`.PandasTableDomain`\ s. These mirror their counterparts in
+  :mod:`tmlt.core.transformations.spark_transformations.join`: same constructor
+  checks, same output domain, and the same stability functions. They share that
+  module's ``TruncationStrategy``, which names a strategy and is engine-neutral, and
+  truncate through :mod:`tmlt.core.utils.pandas_truncation`.
+
+Changed
+~~~~~~~
+
+- :class:`.SymmetricDifference` and :class:`.AddRemoveKeys` now support
+  :class:`.PandasTableDomain`, so that the pandas transformations can be built with
+  them. :meth:`.SymmetricDifference.distance` measures such a table's rows with
+  :mod:`tmlt.core.utils.pandas_grouping`, so that a row holding a NaN compares equal
+  to itself. A dictionary domain mixing pandas tables with Spark dataframes remains
+  unsupported under :class:`.AddRemoveKeys`, and
+  :meth:`.AddRemoveKeys.distance` over a dictionary of pandas tables raises
+  :class:`NotImplementedError` for now.
 
 .. _v0.19.1:
 

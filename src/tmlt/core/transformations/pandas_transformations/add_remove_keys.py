@@ -13,7 +13,7 @@ is not stable under :class:`~.AugmentDictTransformation`, is about the metric ra
 than about either engine, and applies here unchanged.
 
 Not every Spark wrapper has a counterpart here yet. This module holds the ones the
-``AddRowsWithID`` path of :mod:`tmlt.analytics` compiles to for renaming, selecting,
+``AddRowsWithID`` path of ``tmlt.analytics`` compiles to for renaming, selecting,
 mapping, and enforcing truncation constraints:
 
 * :class:`LimitRowsPerGroupValue`
@@ -111,7 +111,7 @@ from tmlt.core.transformations.pandas_transformations.truncation import (
 
 
 class LimitRowsPerGroupValue(TransformValue):
-    """Applies a :class:`~.LimitRowsPerGroup` to the specified key.
+    """Applies a ``LimitRowsPerGroup`` to the specified key.
 
     This is the pandas counterpart of
     :class:`~tmlt.core.transformations.spark_transformations.add_remove_keys.LimitRowsPerGroupValue`.
@@ -152,7 +152,7 @@ class LimitRowsPerGroupValue(TransformValue):
 
 
 class LimitKeysPerGroupValue(TransformValue):
-    """Applies a :class:`~.LimitKeysPerGroup` to the specified key.
+    """Applies a ``LimitKeysPerGroup`` to the specified key.
 
     This is the pandas counterpart of
     :class:`~tmlt.core.transformations.spark_transformations.add_remove_keys.LimitKeysPerGroupValue`.
@@ -196,7 +196,7 @@ class LimitKeysPerGroupValue(TransformValue):
 
 
 class LimitRowsPerKeyPerGroupValue(TransformValue):
-    """Applies a :class:`~.LimitRowsPerKeyPerGroup` to the specified key.
+    """Applies a ``LimitRowsPerKeyPerGroup`` to the specified key.
 
     This is the pandas counterpart of
     :class:`~tmlt.core.transformations.spark_transformations.add_remove_keys.LimitRowsPerKeyPerGroupValue`.
@@ -241,7 +241,7 @@ class LimitRowsPerKeyPerGroupValue(TransformValue):
 
 
 class MapValue(TransformValue):
-    """Applies a :class:`~.Map` to create a new element from specified value.
+    """Applies a ``Map`` to create a new element from specified value.
 
     This is the pandas counterpart of
     :class:`~tmlt.core.transformations.spark_transformations.add_remove_keys.MapValue`.
@@ -281,7 +281,7 @@ class MapValue(TransformValue):
 
 
 class RenameValue(TransformValue):
-    """Applies a :class:`~.Rename` to create a new element from specified value.
+    """Applies a ``Rename`` to create a new element from specified value.
 
     This is the pandas counterpart of
     :class:`~tmlt.core.transformations.spark_transformations.add_remove_keys.RenameValue`.
@@ -323,7 +323,7 @@ class RenameValue(TransformValue):
 
 
 class SelectValue(TransformValue):
-    """Applies a :class:`~.Select` to create a new element from specified value.
+    """Applies a ``Select`` to create a new element from specified value.
 
     This is the pandas counterpart of
     :class:`~tmlt.core.transformations.spark_transformations.add_remove_keys.SelectValue`.

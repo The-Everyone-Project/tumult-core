@@ -9,7 +9,7 @@ same query, which is what lets a caller switch backends without re-accounting.
 
 The noise mechanisms and the privacy accounting are shared with the Spark
 factories rather than restated:
-:func:`~tmlt.core.measurements.aggregations._add_noise_to_series` builds the
+``tmlt.core.measurements.aggregations._add_noise_to_series`` builds the
 same :class:`~.AddNoiseToSeries` from the same
 :class:`~tmlt.core.measurements.aggregations.NoiseMechanism`, and
 :func:`~tmlt.core.utils.parameters.calculate_noise_scale` computes the scale
@@ -30,7 +30,7 @@ Two, both deliberate:
   ``-O``, and reports nothing about what was passed when it is not, so the
   factories here both follow the typed-error one.
 * The scalar (no-``groupby_transformation``) path post-processes with a pandas
-  idiom rather than the Spark one. See :func:`_scalar_answer`.
+  idiom rather than the Spark one. See ``_scalar_answer``.
 """
 
 # SPDX-License-Identifier: Apache-2.0

@@ -1,8 +1,11 @@
 """Unit tests for :mod:`tmlt.core.utils.cleanup`."""
 
+import subprocess
+import sys
 from pathlib import Path
 from random import choice, randint
 from string import ascii_letters, digits
+from textwrap import dedent
 from uuid import uuid4
 
 from tmlt.core.utils.cleanup import cleanup, remove_all_temp_tables
@@ -11,6 +14,57 @@ from tmlt.core.utils.testing import PySparkTest
 
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Tumult Labs 2026
+
+_IMPORT_CLEANUP_AND_EXIT = '''
+"""Imports the cleanup module with a JVM launch forbidden, then exits."""
+
+import pyspark.context
+import pyspark.java_gateway
+
+
+def forbidden(*args, **kwargs):
+    """Stands in for launch_gateway.
+
+    Raises:
+        AssertionError: Always.
+    """
+    raise AssertionError("a JVM was started")
+
+
+# getOrCreate() calls the launch_gateway name that pyspark.context imported,
+# not the one pyspark.java_gateway defines, so both bindings have to go.
+pyspark.java_gateway.launch_gateway = forbidden
+pyspark.context.launch_gateway = forbidden
+
+import tmlt.core.utils.cleanup  # noqa: E402,F401
+'''
+
+
+def test_atexit_hook_does_not_start_a_jvm(tmp_path: Path) -> None:
+    """Importing the module does not start a JVM at interpreter exit.
+
+    ``_cleanup_temp`` is registered with ``atexit``. When it asked for its Spark
+    session with ``getOrCreate`` it built one -- JVM and all -- on the way out of
+    every process that had imported the module, including processes that never
+    touched Spark and so cannot have left a temporary database behind.
+
+    This runs in a subprocess because the hook only fires when an interpreter
+    shuts down, and it inspects stderr rather than the exit status because an
+    exception raised in an ``atexit`` hook is printed and then ignored: the
+    process still exits 0.
+
+    Args:
+        tmp_path: Directory to write the subprocess' script into.
+    """
+    script = tmp_path / "import_cleanup.py"
+    script.write_text(dedent(_IMPORT_CLEANUP_AND_EXIT))
+
+    result = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True, check=True
+    )
+
+    assert "a JVM was started" not in result.stderr, result.stderr
+    assert "atexit" not in result.stderr, result.stderr
 
 
 class TestCleanup(PySparkTest):

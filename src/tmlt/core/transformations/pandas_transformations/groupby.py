@@ -34,6 +34,23 @@ from tmlt.core.utils.pandas_grouped_table import PandasGroupedTable
 from tmlt.core.utils.validation import validate_groupby_domains
 
 
+def _in_schema_order(group_keys: pd.DataFrame, schema_columns: List[str]) -> pd.DataFrame:
+    """Returns a group keys frame with its columns in the schema's order.
+
+    A frame naming a column the schema does not have is returned untouched, so
+    that the domain check in :class:`GroupBy`'s constructor is what reports it.
+
+    Args:
+        group_keys: The group keys to reorder.
+        schema_columns: The input domain's columns, in its order.
+    """
+    columns = list(group_keys.columns)
+    if not set(columns) <= set(schema_columns):
+        return group_keys
+    ordered = [column for column in schema_columns if column in set(columns)]
+    return group_keys if ordered == columns else group_keys[ordered]
+
+
 class GroupBy(Transformation):
     """Groups a pandas DataFrame by given group keys.
 
@@ -126,7 +143,8 @@ class GroupBy(Transformation):
             use_l2: If True, use :class:`~.RootSumOfSquared` instead of :class:`~.SumOf`
                 in the output metric.
             group_keys: DataFrame where rows correspond to group keys. None triggers a
-                total aggregation.
+                total aggregation. Its columns are put in the input domain's
+                order; see :attr:`groupby_columns`.
 
         Note:
             ``group_keys`` must be public.
@@ -136,6 +154,8 @@ class GroupBy(Transformation):
             if use_l2
             else SumOf(SymmetricDifference())
         )
+        if group_keys is not None:
+            group_keys = _in_schema_order(group_keys, list(input_domain.schema))
         # The Spark implementation spells this `group_keys.columns if group_keys
         # else []`; the truth value of a pandas DataFrame is ambiguous, and
         # asking for it raises.
@@ -191,12 +211,23 @@ class GroupBy(Transformation):
 
     @property
     def group_keys(self) -> Optional[pd.DataFrame]:
-        """Returns DataFrame containing group keys, or None for a total aggregation."""
+        """Returns DataFrame containing group keys, or None for a total aggregation.
+
+        Its columns are in the input domain's order, whatever order they were
+        given in; see :attr:`groupby_columns`.
+        """
         return self._group_keys
 
     @property
     def groupby_columns(self) -> List[str]:
-        """Returns list of columns to groupby."""
+        """Returns list of columns to groupby, in the input domain's order.
+
+        An aggregation over the grouped table this produces emits the groupby
+        columns in the order :attr:`group_keys` has them, and the output domain
+        of that aggregation declares them in the order the *schema* has them.
+        Normalizing the group keys here is what makes those two the same order,
+        for either backend and whatever order the group keys were built in.
+        """
         return self._groupby_columns.copy()
 
     def stability_function(self, d_in: ExactNumberInput) -> ExactNumber:
@@ -297,9 +328,12 @@ def create_groupby_from_column_domains(
         ``column_domains`` must be public.
 
     Note:
-        The group keys' columns are in ``column_domains``' order, as the Spark
-        implementation's are; a mapping whose order differs from the input
-        domain's produces group keys that the output domain rejects.
+        Each column's values are taken from ``column_domains``, but the group
+        keys' columns end up in the *input domain's* order, whatever order the
+        mapping lists them in; :class:`GroupBy` puts them there, and the Spark
+        twin does the same. This is the order an aggregation over the result
+        emits its groupby columns in, and the order its output domain declares
+        them in.
     """
     validate_groupby_domains(column_domains, input_domain)
     if not column_domains:
@@ -387,10 +421,10 @@ def create_groupby_from_list_of_keys(
 
     Note:
         Each tuple in ``keys`` is read positionally against ``groupby_columns``,
-        and the resulting group keys are then ordered as the input domain orders
-        those columns. The Spark implementation builds the frame from the
-        projected schema, which orders the columns the same way but reads the
-        tuples positionally against *that* order, so the two agree whenever
+        and the resulting group keys are then put in the input domain's order by
+        :class:`GroupBy`. The Spark implementation builds the frame from the
+        projected schema, which is in the input domain's order too, but reads
+        the tuples positionally against *that* order, so the two agree whenever
         ``groupby_columns`` is in the input domain's order and this one is
         correct when it is not.
     """
@@ -398,9 +432,7 @@ def create_groupby_from_list_of_keys(
         input_domain=input_domain,
         input_metric=input_metric,
         use_l2=use_l2,
-        group_keys=_group_keys_frame(
-            input_domain, groupby_columns, keys, order_by_domain=True
-        ),
+        group_keys=_group_keys_frame(input_domain, groupby_columns, keys),
     )
 
 
@@ -408,7 +440,6 @@ def _group_keys_frame(
     input_domain: PandasTableDomain,
     columns: Sequence[str],
     keys: Sequence[Tuple[Any, ...]],
-    order_by_domain: bool = False,
 ) -> pd.DataFrame:
     r"""Returns a group keys frame holding ``keys``, with the domain's dtypes.
 
@@ -419,22 +450,23 @@ def _group_keys_frame(
     a null into floats. This is the pandas counterpart of the Spark
     implementation's building a frame under an explicit schema.
 
+    The frame's columns are in ``columns``' order, which is the order the key
+    tuples are read in. :class:`GroupBy` is what puts them in the input
+    domain's order, so there is nothing to choose between here.
+
     Args:
         input_domain: The domain the keys' columns are described by.
         columns: The key columns, one per position of a key tuple.
         keys: The group keys, as tuples aligned with ``columns``.
-        order_by_domain: Whether to order the frame's columns as ``input_domain``
-            orders them, rather than as ``columns`` does.
     """
     projected = input_domain.project(columns)
-    ordered = list(projected.schema) if order_by_domain else list(columns)
-    positions = {column: position for position, column in enumerate(columns)}
+    ordered = list(columns)
     return pd.DataFrame(
         {
             column: pd.Series(
-                [key[positions[column]] for key in keys], dtype=object
+                [key[position] for key in keys], dtype=object
             ).astype(projected[column].pandas_dtype)
-            for column in ordered
+            for position, column in enumerate(ordered)
         },
         columns=ordered,
     )

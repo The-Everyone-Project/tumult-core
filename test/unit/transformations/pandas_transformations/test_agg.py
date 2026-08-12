@@ -380,15 +380,24 @@ def test_count_distinct_counts_rows_with_nulls() -> None:
     assert list(actual["count_distinct"]) == [3]
 
 
-def test_output_domain_orders_groupby_columns_as_the_schema_does() -> None:
-    """The output's columns are the schema's order, which the output domain fixes.
+@parametrize(
+    Case("schema-order")(grouping=["A", "B", "C"]),
+    Case("reversed")(grouping=["C", "B", "A"]),
+    Case("shuffled")(grouping=["B", "A", "C"]),
+)
+def test_output_domain_orders_groupby_columns_as_the_schema_does(
+    grouping: List[str],
+) -> None:
+    """The output's columns are the schema's order, whatever order the keys had.
 
-    The Spark implementations build the output domain by iterating over
-    ``groupby_columns``, which is a frozenset, so its column order is unrelated
-    to the order the group keys -- and so the output frame -- are in. This one
-    uses the schema's order, which is the group keys' order, so that the output
-    of the transformation is in its own output domain however many columns are
-    grouped by.
+    An aggregation emits the groupby columns in the order the *group keys* have
+    them, and declares them in the order the *schema* has them. Those are one
+    order because :class:`~.GroupBy` puts the group keys in the schema's order;
+    without that, group keys built from a reversed keyset produced an output
+    frame that the transformation's own output domain rejected.
+
+    Args:
+        grouping: The order the group keys' columns are given in.
     """
     schema = {
         "A": PandasStringColumnDescriptor(),
@@ -396,7 +405,6 @@ def test_output_domain_orders_groupby_columns_as_the_schema_does() -> None:
         "C": PandasStringColumnDescriptor(),
         "X": PandasIntegerColumnDescriptor(),
     }
-    grouping = ["A", "B", "C"]
     frame = pd.DataFrame(
         {
             "A": pd.Series(["a1"], dtype=object),
@@ -411,13 +419,14 @@ def test_output_domain_orders_groupby_columns_as_the_schema_does() -> None:
         use_l2=False,
         group_keys=frame[grouping],
     )
+    assert groupby.groupby_columns == ["A", "B", "C"]
     for transformation_type in (CountGrouped, CountDistinctGrouped):
         transformation = transformation_type(
             input_domain=cast(PandasGroupedTableDomain, groupby.output_domain),
             input_metric=SumOf(SymmetricDifference()),
         )
         output = transformation(groupby(frame))
-        assert list(output.columns)[:3] == grouping
+        assert list(output.columns)[:3] == ["A", "B", "C"]
         assert output in transformation.output_domain
 
 

@@ -35,19 +35,35 @@ A development machine can only build its own. Producing all three needs the CI
 matrix, which is the whole reason the release workflow exists. The sdist is
 built once, by the Linux job.
 
-A local build for the machine you are on:
+A local build, for a smoke test only:
 
 ```sh
-MACOSX_DEPLOYMENT_TARGET=11.0 uv build          # wheel + sdist into dist/
+uv build --sdist          # portable; this is the artifact CI also produces
+uv build --wheel          # this machine's wheel -- see the caveat below
 ```
 
-`MACOSX_DEPLOYMENT_TARGET=11.0` matters on macOS: without it `sysconfig` reports
-the running system's version and you get, say, `macosx_15_0_arm64`, which does
-not match the published set. `[tool.cibuildwheel.macos]` sets the same value in
-CI.
+The sdist is the real thing: it carries the vendored source archives and no
+compiled libraries, and CI builds every wheel from it.
 
-Do **not** run `nox -s build` for this: that session runs `cibuildwheel`, which
-wants Docker for the Linux wheels and rebuilds the vendored libraries from
+The local **wheel is not releasable**, and not only because it covers one
+platform. The build hook takes the wheel's platform tag from
+`sysconfig.get_platform()`, which reports the *interpreter's* build
+configuration rather than the machine's. On a python.org framework CPython that
+is `macosx-10.9-universal2` whatever `MACOSX_DEPLOYMENT_TARGET` is set to in the
+environment — the value comes from the interpreter's own config vars, so
+exporting it changes nothing. The result is a wheel tagged
+`py3-none-macosx_10_9_universal2` containing arm64-only `.dylib`s: a tag that
+claims more than the contents deliver. It imports and runs fine on the machine
+that built it, which is all it is for.
+
+CI gets the right tags because cibuildwheel supplies its own CPython builds and
+sets the deployment target and `ARCHFLAGS` for each target architecture;
+`[tool.cibuildwheel.macos]` pins `MACOSX_DEPLOYMENT_TARGET='11.0'`, which is
+where `macosx_11_0_*` in the published names comes from. Check the tags on the
+CI artifacts against the table above before attaching them to a release.
+
+Do **not** run `nox -s build` locally: that session runs `cibuildwheel`, which
+wants Docker for the Linux wheels and rebuilds GMP, MPFR, FLINT and ARB from
 scratch for each of three Python versions.
 
 ## Before you tag

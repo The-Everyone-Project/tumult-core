@@ -175,7 +175,7 @@ Changed
   **This changes the column order of such an aggregation's result**, on both
   backends at once so that they stay in step; an aggregation whose keyset was
   already in the input domain's order is unaffected.
-- :func:`~tmlt.core.utils.exact_number.ExactNumber` remembers the conversion of
+- :class:`~tmlt.core.utils.exact_number.ExactNumber` remembers the conversion of
   the integers and strings it is built from, up to a bounded number of them.
   Building the :class:`sympy.Expr` -- ``sympy.simplify`` above all -- dominates
   the cost of an :class:`~.ExactNumber`, and a privacy calculation builds tens

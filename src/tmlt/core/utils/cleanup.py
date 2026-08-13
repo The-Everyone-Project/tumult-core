@@ -46,6 +46,14 @@ def _cleanup_temp() -> None:
     about it. This is the ordinary case for a pandas-only process, and it is
     also what a process sees after ``spark.stop()``: the session object is gone
     along with the JVM that held the database.
+
+    This deliberately does not warn, where an earlier version did. The two
+    misses are not the same event. That version called ``getOrCreate`` and
+    warned when it *raised*, which meant a session was wanted and could not be
+    had -- worth saying. A miss here means no session was ever built in this
+    process, so there is no temporary database to leave behind and nothing has
+    gone wrong; warning about it would fire on the way out of every pandas-only
+    run.
     """
     spark = _running_session()
     if spark is None:

@@ -34,8 +34,8 @@ def _running_session() -> Optional[SparkSession]:
     Returns:
         The active session, else the process' instantiated session, else None.
     """
-    # pylint: disable=protected-access
-    return SparkSession.getActiveSession() or SparkSession._instantiatedSession
+    active = SparkSession.getActiveSession()
+    return active or SparkSession._instantiatedSession  # noqa: SLF001
 
 
 def _cleanup_temp() -> None:

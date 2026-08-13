@@ -631,7 +631,9 @@ def test_mixed_datetime_units_keep_their_values(how: str) -> None:
         how: The join type.
     """
     left = pd.DataFrame({"t": _timestamps(["2021-06-01T12:00:00"], "s"), "l": [1]})
-    right = pd.DataFrame({"t": _timestamps(["2021-06-01T12:00:00.500"], "ms"), "r": [2]})
+    right = pd.DataFrame(
+        {"t": _timestamps(["2021-06-01T12:00:00.500"], "ms"), "r": [2]}
+    )
 
     result = join(left, right, on=["t"], how=how)
 
@@ -743,7 +745,9 @@ def test_nulls_are_equal_applies_to_a_categorical_key() -> None:
     left = pd.DataFrame({"k": pd.Series(["a", None], dtype="category"), "l": [1, 2]})
     right = pd.DataFrame({"k": pd.Series(["a", None], dtype="category"), "r": [3, 4]})
     assert list(join(left, right, on=["k"], how="inner")["l"]) == [1]
-    assert list(join(left, right, on=["k"], how="inner", nulls_are_equal=True)["l"]) == [
+    assert list(
+        join(left, right, on=["k"], how="inner", nulls_are_equal=True)["l"]
+    ) == [
         1,
         2,
     ]

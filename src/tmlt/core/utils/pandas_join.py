@@ -359,9 +359,10 @@ def _in_unit(column: pd.Series, unit: str, side: str, name: str) -> pd.Series:
             represent.
     """
     target = np.dtype(f"datetime64[{unit}]")
+    own_unit = _datetime64_unit(column.dtype)
     message = (
-        f"'{name}' cannot be joined on: it is datetime64[{_datetime64_unit(column.dtype)}]"
-        f" in the {side} dataframe, which has to be compared in the finer unit"
+        f"'{name}' cannot be joined on: it is datetime64[{own_unit}] in the"
+        f" {side} dataframe, which has to be compared in the finer unit"
         f" datetime64[{unit}] of the other one, and it holds a value outside the"
         f" range datetime64[{unit}] can represent."
     )
@@ -408,19 +409,18 @@ def _reconciled_units(
     """
     replacements: Tuple[Dict[str, pd.Series], Dict[str, pd.Series]] = ({}, {})
     for column in on:
-        units = (
-            _datetime64_unit(left[column].dtype),
-            _datetime64_unit(right[column].dtype),
-        )
-        if None in units or units[0] == units[1]:
+        left_unit = _datetime64_unit(left[column].dtype)
+        right_unit = _datetime64_unit(right[column].dtype)
+        if left_unit is None or right_unit is None or left_unit == right_unit:
             continue
-        ranks = tuple(_DATETIME64_UNITS.index(unit) for unit in units)  # type: ignore[arg-type]
+        units = (left_unit, right_unit)
+        ranks = tuple(_DATETIME64_UNITS.index(unit) for unit in units)
         coarser = 0 if ranks[0] < ranks[1] else 1
-        finer_unit = units[1 - coarser]
-        assert finer_unit is not None
-        frame = (left, right)[coarser]
         replacements[coarser][column] = _in_unit(
-            frame[column], finer_unit, ("left", "right")[coarser], column
+            (left, right)[coarser][column],
+            units[1 - coarser],
+            ("left", "right")[coarser],
+            column,
         )
     return (
         _with_columns(left, replacements[0]),

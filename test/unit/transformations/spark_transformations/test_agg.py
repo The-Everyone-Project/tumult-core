@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Tumult Labs 2026
 
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union, cast
 
 import numpy as np
 import pandas as pd
@@ -1368,9 +1368,7 @@ class TestDerivedTransformations(PySparkTest):
 class TestGroupedOutputColumnOrder(PySparkTest):
     """The order an aggregation's groupby columns come out in."""
 
-    @parameterized.expand(
-        [(["A", "B", "C"],), (["C", "B", "A"],), (["B", "A", "C"],)]
-    )
+    @parameterized.expand([(["A", "B", "C"],), (["C", "B", "A"],), (["B", "A", "C"],)])
     def test_output_domain_orders_groupby_columns_as_the_schema_does(
         self, grouping: List[str]
     ):
@@ -1403,9 +1401,10 @@ class TestGroupedOutputColumnOrder(PySparkTest):
             group_keys=dataframe.select(*grouping),
         )
         self.assertEqual(groupby.groupby_columns, ["A", "B", "C"])
+        grouped_domain = cast(SparkGroupedDataFrameDomain, groupby.output_domain)
         for transformation_type in (CountGrouped, CountDistinctGrouped):
             transformation = transformation_type(
-                input_domain=groupby.output_domain,
+                input_domain=grouped_domain,
                 input_metric=SumOf(SymmetricDifference()),
             )
             output = transformation(groupby(dataframe))

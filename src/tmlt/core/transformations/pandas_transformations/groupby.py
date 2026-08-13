@@ -34,7 +34,9 @@ from tmlt.core.utils.pandas_grouped_table import PandasGroupedTable
 from tmlt.core.utils.validation import validate_groupby_domains
 
 
-def _in_schema_order(group_keys: pd.DataFrame, schema_columns: List[str]) -> pd.DataFrame:
+def _in_schema_order(
+    group_keys: pd.DataFrame, schema_columns: List[str]
+) -> pd.DataFrame:
     """Returns a group keys frame with its columns in the schema's order.
 
     A frame naming a column the schema does not have is returned untouched, so
@@ -463,9 +465,9 @@ def _group_keys_frame(
     ordered = list(columns)
     return pd.DataFrame(
         {
-            column: pd.Series(
-                [key[position] for key in keys], dtype=object
-            ).astype(projected[column].pandas_dtype)
+            column: pd.Series([key[position] for key in keys], dtype=object).astype(
+                projected[column].pandas_dtype
+            )
             for position, column in enumerate(ordered)
         },
         columns=ordered,

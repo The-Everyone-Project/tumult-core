@@ -13,6 +13,11 @@ descriptor on either backend, and a column of pandas' own string dtype has no
 descriptor family deliberately accepts only ``object``. Cases with such a column
 are not describable, and :data:`DESCRIBABLE_CASES` leaves them out rather than
 having each suite skip them.
+
+The group keys a case is grouped by are here too -- :func:`key_schema`, which
+is the Spark schema such a frame of keys has to be built under, and
+:func:`keys_survive_spark_round_trip`, which says whether a frame of them comes
+back from Spark as itself.
 """
 
 # SPDX-License-Identifier: Apache-2.0

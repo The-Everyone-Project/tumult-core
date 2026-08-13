@@ -1,7 +1,8 @@
 .. _core-changelog:
 
 Changelog
-==
+=========
+
 0.19.1+ep.backend.3 (unreleased)
 --------------------------------
 

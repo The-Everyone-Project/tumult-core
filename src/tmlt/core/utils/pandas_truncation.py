@@ -585,8 +585,9 @@ def _render_nan_classified_values(values: np.ndarray, nan_mask: np.ndarray) -> N
 
     Args:
         values: The object array whose NaN-classified values are rendered.
-        nan_mask: The array's NaN mask, as :func:`_null_and_nan_masks`
-            returns it -- possibly shared through a :class:`_FactorizeMemo`.
+        nan_mask: The array's NaN mask, as
+            :func:`tmlt.core.utils.pandas_grouping._null_and_nan_masks` returns
+            it -- possibly shared through a :class:`_FactorizeMemo`.
     """
     for position in np.flatnonzero(nan_mask):
         _render_value(values[position])
@@ -943,8 +944,9 @@ def _dense_ranks_from_factorization(
 
     Args:
         factorization: The ``(codes, uniques)`` pair, as
-            :func:`_canonical_factorization` returns it, with the missing
-            positions carrying ``pd.factorize``'s sentinel.
+            :func:`tmlt.core.utils.pandas_grouping._canonical_factorization`
+            returns it, with the missing positions carrying ``pd.factorize``'s
+            sentinel.
 
     Returns:
         An int64 array aligned with the codes.

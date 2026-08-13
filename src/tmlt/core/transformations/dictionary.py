@@ -534,9 +534,6 @@ class TransformValue(Transformation):
 
         Args:
             d_in: Distance between inputs under input_metric.
-
-        Raises:
-            NotImplementedError: If not overridden.
         """
         self.input_metric.validate(d_in)
         return ExactNumber(d_in)

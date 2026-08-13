@@ -650,12 +650,18 @@ def _shared_ids(
 
     Two rows -- in the same frame or in different ones -- get the same number
     exactly when Spark's ``<=>`` holds between their values, which is what
-    :func:`tmlt.core.utils.pandas_grouping.group_codes` decides. The numbering
-    is done per frame, vectorized, and then reconciled through the *distinct*
-    values' :func:`~tmlt.core.utils.pandas_grouping.row_keys`, which are
-    comparable across frames; the reconciliation therefore costs one Python-level
-    step per distinct value rather than per row, and the two columns need not
-    even have the same dtype.
+    :func:`tmlt.core.utils.pandas_grouping.group_codes` decides.
+
+    Two columns of one dtype are numbered *together*, by grouping the
+    concatenation of the two: there is then only one numbering, so there is
+    nothing to reconcile, and it is one vectorized pass over both frames' rows.
+    Columns of different dtypes -- an ``int64`` joined to an ``Int64``, which
+    hold the same integers -- cannot be concatenated without pandas choosing a
+    common dtype for them, so each is numbered on its own and the two numberings
+    are reconciled through the *distinct* values'
+    :func:`~tmlt.core.utils.pandas_grouping.row_keys`, which are comparable
+    across frames and across dtypes. That costs a Python-level step per distinct
+    value, where the concatenation costs none.
 
     Args:
         left_column: The left frame's join column.
@@ -665,6 +671,14 @@ def _shared_ids(
         The left column's numbers, the right column's numbers, and how many
         distinct numbers were handed out.
     """
+    if left_column.dtype == right_column.dtype:
+        codes = group_codes(pd.concat([left_column, right_column], ignore_index=True))
+        left_count = len(left_column)
+        return (
+            codes[:left_count],
+            codes[left_count:],
+            (int(codes.max()) + 1) if len(codes) else 0,
+        )
     shared: Dict[Any, int] = {}
     left_codes = group_codes(left_column)
     right_codes = group_codes(right_column)

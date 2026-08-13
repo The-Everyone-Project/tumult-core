@@ -7,7 +7,8 @@ import atexit
 import logging
 import os
 import sys
-from test.unit.backend_testing import BACKEND_NAMES, Backend
+from contextlib import contextmanager
+from test.unit.backend_testing import BACKEND_NAMES, Backend, utc_session_timezone
 from typing import Any, Iterator, List, NoReturn
 from unittest.mock import Mock, create_autospec
 
@@ -74,6 +75,60 @@ def pyspark():
 def class_spark(request, spark):
     """Injects spark into class tests that do not accept it as a parameter."""
     request.cls.spark = spark
+
+
+_SHUFFLE_PARTITIONS_KEY = "spark.sql.shuffle.partitions"
+
+
+@contextmanager
+def few_shuffle_partitions(spark: SparkSession, partitions: int = 4) -> Iterator[None]:
+    """Lowers Spark's shuffle partition count, restoring it on exit.
+
+    The suites that compare Spark against pandas run over tiny frames, and the
+    window functions and joins in them shuffle; with the default of 200
+    partitions the fixed per-partition overhead dominates their runtime. The
+    partition count changes how much work Spark does, not what it computes.
+
+    Args:
+        spark: The Spark session to configure.
+        partitions: The shuffle partition count to use.
+
+    Yields:
+        Nothing; the setting applies for the duration of the ``with`` block.
+    """
+    previous = spark.conf.get(_SHUFFLE_PARTITIONS_KEY, None)
+    spark.conf.set(_SHUFFLE_PARTITIONS_KEY, str(partitions))
+    try:
+        yield
+    finally:
+        if previous is None:
+            spark.conf.unset(_SHUFFLE_PARTITIONS_KEY)
+        else:
+            spark.conf.set(_SHUFFLE_PARTITIONS_KEY, previous)
+
+
+@pytest.fixture(name="utc_spark")
+def utc_spark_fixture(spark: SparkSession) -> Iterator[SparkSession]:
+    """Yields the session-scoped Spark session, configured for the parity suites.
+
+    The session timezone is UTC for the duration of each test, which is what
+    makes a naive timestamp denote the same wall clock on both backends, and
+    the shuffle partition count is lowered. Both settings are restored
+    afterwards.
+
+    This lives here, beside the ``spark`` and ``backend`` fixtures, for the same
+    reason those do: every suite that compares the two backends over a frame
+    with timestamps needs exactly this session, and one copy of it cannot drift
+    from another.
+
+    Args:
+        spark: The session-scoped Spark session.
+
+    Yields:
+        The same Spark session.
+    """
+    with utc_session_timezone(spark), few_shuffle_partitions(spark):
+        yield spark
 
 
 ################################################################################

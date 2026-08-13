@@ -17,11 +17,14 @@ truncation it runs first -- is tested through the results.
 
 import re
 from test.unit.backend_testing import assert_frames_equal_as_multisets
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
+from test.unit.transformations.pandas_transformations.structural_testing import (
+    D_IN_GRID,
+    outcome,
+)
+from typing import Any, Dict, Optional, Type, Union
 
 import pandas as pd
 import pytest
-import sympy as sp
 
 from tmlt.core.domains.collections import DictDomain
 from tmlt.core.domains.pandas_domains import (
@@ -47,11 +50,6 @@ from tmlt.core.transformations.spark_transformations.join import (
 from tmlt.core.transformations.spark_transformations.join import TruncationStrategy
 from tmlt.core.utils.exact_number import ExactNumber, ExactNumberInput
 from tmlt.core.utils.testing import Case, parametrize
-
-#: The distances every stability function is compared on. ``sympy.oo`` is
-#: included because the NO_TRUNCATION strategy has infinite stability, and 3/2
-#: because a distance need not be an integer.
-D_IN_GRID: List[ExactNumberInput] = [0, 1, 2, 7, sp.Integer(3) / 2, sp.oo]
 
 #: The truncation strategies, with a threshold each strategy accepts.
 TRUNCATIONS = [
@@ -87,26 +85,6 @@ LEFT_DF = pd.DataFrame(
 RIGHT_DF = pd.DataFrame({"B": ["b1", "b2", "b2"], "C": ["c1", "c2", "c3"]})
 
 IGNORED_DF = pd.DataFrame({"B": ["b1", "b2", "b2"], "D": ["d1", "d1", "d2"]})
-
-
-def _outcome(compute: Callable[[], Any]) -> Tuple[str, Any]:
-    """Returns what a call produced, whether a value or an exception.
-
-    The two backends share their stability functions verbatim, so they must
-    agree on the arguments those reject as well as on the ones they answer:
-    an infinite truncation threshold against a zero distance multiplies
-    infinity by zero, which :class:`~.ExactNumber` refuses on both.
-
-    Args:
-        compute: The call to make.
-
-    Returns:
-        ``("value", result)``, or ``("error", type name, message)``.
-    """
-    try:
-        return ("value", compute())
-    except Exception as error:
-        return ("error", (type(error).__name__, str(error)))
 
 
 def _spark_domain(
@@ -273,12 +251,12 @@ class TestPrivateJoin:
             "right_truncation_threshold": right_threshold,
         }
         d_in = {"left": left_d_in, "right": right_d_in}
-        pandas_outcome = _outcome(
+        pandas_outcome = outcome(
             lambda: PrivateJoin(
                 input_domain=_pandas_input_domain(), **arguments
             ).stability_function(d_in)
         )
-        spark_outcome = _outcome(
+        spark_outcome = outcome(
             lambda: SparkPrivateJoin(
                 input_domain=_spark_input_domain(), **arguments
             ).stability_function(d_in)
@@ -544,10 +522,10 @@ class TestPrivateJoinOnKey:
         Args:
             d_in: The input distance.
         """
-        pandas_outcome = _outcome(
+        pandas_outcome = outcome(
             lambda: _private_join_on_key().stability_function(d_in)
         )
-        spark_outcome = _outcome(
+        spark_outcome = outcome(
             lambda: SparkPrivateJoinOnKey(
                 input_domain=_spark_key_domain(),
                 input_metric=KEY_METRIC,

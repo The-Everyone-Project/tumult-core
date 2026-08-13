@@ -16,6 +16,7 @@ import textwrap
 import time
 from contextlib import nullcontext as does_not_raise
 from itertools import combinations_with_replacement, product
+from test.unit.backend_testing import floating_array
 from test.unit.domains.abstract import DomainTests
 from typing import Any, Callable, ContextManager, Dict, List, Optional, Type
 
@@ -79,13 +80,7 @@ def _nan_and_null_frame() -> pd.DataFrame:
     Only a :class:`pandas.arrays.FloatingArray` built from its values and its
     mask can hold both: every convenience constructor turns the NaN into a null.
     """
-    return pd.DataFrame(
-        {
-            "A": pd.arrays.FloatingArray(
-                np.array([1.0, np.nan, 2.0]), np.array([False, False, True])
-            )
-        }
-    )
+    return pd.DataFrame({"A": floating_array([1.0, np.nan, 2.0], [False, False, True])})
 
 
 class TestPandasColumnDescriptors:

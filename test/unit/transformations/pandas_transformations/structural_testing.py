@@ -7,7 +7,9 @@ Three things live here, all of them used by more than one of the suites for
   transformation's stability function against its Spark twin's over a fixed
   grid of distances rather than against a hard-coded expectation. The two
   implementations' ``stability_function`` bodies are copies of each other, and
-  this is what keeps them copies.
+  this is what keeps them copies. :func:`assert_same_rejection` does the same
+  for two constructors, and :func:`outcome` -- what a call returned, or how it
+  failed -- is what both compare.
 * :func:`pandas_domain_for_case` and :func:`spark_domain_for_case`, which
   describe an :class:`~test.unit.backend_testing.corpus.EdgeCase` as a domain
   for either backend, and :func:`describable_cases`, which is the subset of the
@@ -25,8 +27,9 @@ backend-neutral and frozen, and everything here knows what a
 
 import datetime
 import math
+import re
 from test.unit.backend_testing import EDGE_CASES, EdgeCase
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import sympy as sp
 from pyspark.sql.types import DateType, StringType
@@ -48,22 +51,32 @@ from tmlt.core.transformations.base import Transformation
 D_IN_GRID: Tuple[Any, ...] = (0, 1, 2, 7, sp.Integer(3) / 2, sp.oo)
 
 
+def outcome(call: Callable[[], Any]) -> Tuple[Any, ...]:
+    """Returns what a call did: the value it returned, or the error it raised.
+
+    What a pandas implementation *refuses* is as much a part of what it copies
+    from its Spark twin as what it computes -- a ``d_in`` of 3/2 under
+    :class:`~tmlt.core.metrics.SymmetricDifference`, or an argument a
+    constructor rejects -- so a rejection is returned rather than raised, and
+    the two backends are compared over outcomes.
+
+    Args:
+        call: The callable to run.
+    """
+    try:
+        return ("value", call())
+    except Exception as exception:
+        return ("error", type(exception).__name__, str(exception))
+
+
 def _stability_outcome(transformation: Transformation, d_in: Any) -> Tuple[Any, ...]:
     """Returns what a transformation's stability function does with a distance.
-
-    A distance the metric rejects -- 3/2 under
-    :class:`~tmlt.core.metrics.SymmetricDifference`, say -- is as much a part of
-    a stability function's behaviour as one it accepts, so the rejection is
-    returned rather than raised.
 
     Args:
         transformation: The transformation to ask.
         d_in: The distance to ask about.
     """
-    try:
-        return ("value", transformation.stability_function(d_in))
-    except Exception as exception:
-        return ("error", type(exception).__name__, str(exception))
+    return outcome(lambda: transformation.stability_function(d_in))
 
 
 def assert_stability_parity(
@@ -84,6 +97,47 @@ def assert_stability_parity(
         assert actual == expected, (
             f"stability_function({d_in}) gives {actual} for the pandas "
             f"transformation and {expected} for its Spark twin."
+        )
+
+
+def assert_same_rejection(
+    pandas_build: Callable[[], Any],
+    spark_build: Callable[[], Any],
+    match: str,
+    same_message: bool = True,
+) -> None:
+    """Asserts two constructors reject their arguments the same way.
+
+    Args:
+        pandas_build: A callable constructing the pandas transformation.
+        spark_build: A callable constructing its Spark twin.
+        match: A regex both error messages must match.
+        same_message: Whether the two messages must be identical. They are,
+            except for the errors
+            :class:`~tmlt.core.transformations.base.Transformation` raises
+            itself, which name the domain -- and the two domains have different
+            reprs.
+    """
+    pandas_outcome = outcome(pandas_build)
+    spark_outcome = outcome(spark_build)
+    assert pandas_outcome[0] == "error", (
+        f"The pandas transformation was built, but its Spark twin gave {spark_outcome}."
+    )
+    assert spark_outcome[0] == "error", (
+        f"The Spark transformation was built, but the pandas one gave {pandas_outcome}."
+    )
+    assert pandas_outcome[1] == spark_outcome[1], (
+        f"Different error types: pandas raised {pandas_outcome[1]} and Spark "
+        f"{spark_outcome[1]}."
+    )
+    for name, rejection in (("pandas", pandas_outcome), ("Spark", spark_outcome)):
+        assert re.search(match, rejection[2]), (
+            f"The {name} error message {rejection[2]!r} does not match {match!r}."
+        )
+    if same_message:
+        assert pandas_outcome[2] == spark_outcome[2], (
+            f"Different error messages: pandas raised {pandas_outcome[2]!r} and "
+            f"Spark {spark_outcome[2]!r}."
         )
 
 

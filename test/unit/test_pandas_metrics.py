@@ -53,12 +53,12 @@ from test.unit.backend_testing import (
     ColumnSpec,
     EdgeCase,
     domain_for,
+    floating_array,
     spark_df_from_pandas,
     utc_session_timezone,
 )
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
-import numpy as np
 import pandas as pd
 import pytest
 import sympy as sp
@@ -395,8 +395,7 @@ def _float64_frame(values: List[float], mask: List[bool]) -> pd.DataFrame:
     Returns:
         The frame, with one column ``v``.
     """
-    array = pd.arrays.FloatingArray(np.array(values), np.array(mask))
-    return pd.DataFrame({"v": array})
+    return pd.DataFrame({"v": floating_array(values, mask)})
 
 
 ################################################################################

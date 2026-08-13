@@ -26,18 +26,21 @@ from test.unit.backend_testing import (
 )
 from test.unit.pandas_grouped_testing import (
     GROUPABLE_CASES,
+    key_schema,
+    keys_survive_spark_round_trip,
     pandas_domain,
     spark_domain,
     spark_frame,
+)
+from test.unit.transformations.pandas_transformations.structural_testing import (
+    assert_stability_parity,
 )
 from typing import Any, List, Tuple, cast
 
 import numpy as np
 import pandas as pd
 import pytest
-import sympy as sp
 from pyspark.sql import DataFrame, SparkSession
-from pyspark.sql.types import StructType
 
 from tmlt.core.domains.pandas_domains import (
     PandasGroupedTableDomain,
@@ -70,9 +73,6 @@ from tmlt.core.utils.testing import (
     get_all_props,
     parametrize,
 )
-
-#: The d_in values every stability function is pinned at.
-D_IN_GRID: Tuple[Any, ...] = (0, 1, 2, 7, sp.Integer(3) / 2, sp.oo)
 
 _SCHEMA = {
     "A": PandasStringColumnDescriptor(),
@@ -139,19 +139,6 @@ def _count_metric_cases() -> List[Case]:
         for name, pandas_type, spark_type, default_column in _COUNTS
         for metric_name, metric in _INPUT_METRICS
     ]
-
-
-def _outcome(call: Any, *args: Any) -> Any:
-    """Returns what a call returns, or a description of how it failed.
-
-    Args:
-        call: The callable to run.
-        args: Its arguments.
-    """
-    try:
-        return call(*args)
-    except Exception as exception:
-        return (type(exception).__name__, str(exception))
 
 
 ################################################################################
@@ -266,10 +253,7 @@ def test_stability_function_matches_spark(
     spark_transformation = spark_type(
         input_domain=_SPARK_DOMAIN, input_metric=input_metric(SymmetricDifference())
     )
-    for d_in in D_IN_GRID:
-        assert _outcome(transformation.stability_function, d_in) == _outcome(
-            spark_transformation.stability_function, d_in
-        ), f"stability functions disagreed at d_in={d_in}"
+    assert_stability_parity(transformation, spark_transformation)
     assert transformation.stability_function(2) == ExactNumber(2)
 
 
@@ -435,17 +419,6 @@ def test_output_domain_orders_groupby_columns_as_the_schema_does(
 ################################################################################
 
 
-def _key_schema(case: EdgeCase) -> StructType:
-    """Returns the Spark schema of a case's grouping columns.
-
-    Args:
-        case: The corpus case whose grouping columns are wanted.
-    """
-    return StructType(
-        [field for field in case.spark_schema.fields if field.name in case.grouping]
-    )
-
-
 def _pandas_counts(
     case: EdgeCase,
     frame: pd.DataFrame,
@@ -497,7 +470,7 @@ def _spark_counts(
         input_domain=spark_domain(case),
         input_metric=SymmetricDifference(),
         use_l2=False,
-        group_keys=spark_df_from_pandas(spark, keys, schema=_key_schema(case)),
+        group_keys=spark_df_from_pandas(spark, keys, schema=key_schema(case)),
     )
     count = spark_transformation_type(
         input_domain=groupby.output_domain, input_metric=SumOf(SymmetricDifference())
@@ -541,7 +514,7 @@ def test_counts_match_spark(
         spark_output = to_pandas(
             _spark_counts(spark, case, frame, keys, spark_type), Backend(name="spark")
         )
-    if _keys_survive_spark_round_trip(keys, grouping):
+    if keys_survive_spark_round_trip(keys, grouping):
         assert_frames_equal_as_multisets(pandas_output, spark_output)
     else:
         # ``toPandas()`` widens a nullable integer column holding a null to
@@ -554,24 +527,6 @@ def test_counts_match_spark(
     # The output's rows are the declared keys, in the declared order.
     assert list(row_keys(pandas_output[grouping], grouping)) == list(
         row_keys(keys, grouping)
-    )
-
-
-def _keys_survive_spark_round_trip(keys: pd.DataFrame, grouping: List[str]) -> bool:
-    """Returns whether a frame of group keys is unchanged by a Spark round trip.
-
-    A null survives ``toPandas()`` as a null only in an ``object`` column; in a
-    column ``toPandas()`` widens -- a nullable integer one, say -- it comes back
-    as a NaN, which the harness's comparison keys deliberately keep distinct
-    from a null.
-
-    Args:
-        keys: The group keys.
-        grouping: The grouping columns.
-    """
-    return not any(
-        keys[column].isna().any() and keys.dtypes[column] != np.dtype(object)
-        for column in grouping
     )
 
 

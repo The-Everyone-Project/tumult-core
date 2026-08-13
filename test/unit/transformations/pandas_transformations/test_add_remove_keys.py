@@ -7,7 +7,8 @@ So nothing here is checked against a written-down expectation; it is checked aga
 the Spark twin:
 
 * The constructors accept and reject the same arguments, with the same errors --
-  :func:`_assert_same_rejection` builds both and compares the exceptions.
+  :func:`~test.unit.transformations.pandas_transformations.structural_testing.assert_same_rejection`
+  builds both and compares the exceptions.
 * The two describe their output identically: the same
   :class:`~tmlt.core.metrics.AddRemoveKeys` output metric (which names columns, so it
   is engine-independent and compared directly), and an output domain whose new table
@@ -38,7 +39,6 @@ differential tests take the ``spark`` fixture, so ``test/conftest.py`` marks the
 
 import re
 from collections import Counter
-from contextlib import contextmanager
 from dataclasses import dataclass
 from test.unit.backend_testing import (
     ROW_ID_COLUMN,
@@ -49,16 +49,16 @@ from test.unit.backend_testing import (
     spark_df_from_case,
     spark_df_from_pandas,
     to_pandas,
-    utc_session_timezone,
 )
 from test.unit.transformations.pandas_transformations.structural_testing import (
+    assert_same_rejection,
     assert_stability_parity,
     describable_cases,
     labelled_value,
     pandas_domain_for_case,
     spark_domain_for_case,
 )
-from typing import Any, Callable, Dict, Iterator, List, Mapping, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Tuple
 
 import pandas as pd
 import pytest
@@ -199,9 +199,6 @@ OTHER_DF = pd.DataFrame({"A": ["X", "X"], "D": [1, 2]})
 """A frame in :data:`OTHER_SCHEMA`."""
 
 _SPARK_BACKEND = Backend(name="spark")
-
-_SHUFFLE_PARTITIONS_KEY = "spark.sql.shuffle.partitions"
-
 
 ################################################################################
 # The wrappers under test
@@ -433,66 +430,6 @@ def _build(wrapper: Wrapper, spark: bool, **overrides: Any) -> TransformValue:
 
 
 ################################################################################
-# Comparing two constructors
-################################################################################
-
-
-def _outcome(build: Callable[[], Any]) -> Tuple[Any, ...]:
-    """Returns what constructing a transformation did.
-
-    A rejection is returned rather than raised, so that two constructors can be
-    compared on the arguments they refuse as well as on the ones they accept.
-
-    Args:
-        build: A callable that constructs the transformation.
-    """
-    try:
-        build()
-    except Exception as exception:
-        return ("error", type(exception).__name__, str(exception))
-    return ("ok",)
-
-
-def _assert_same_rejection(
-    pandas_build: Callable[[], Any],
-    spark_build: Callable[[], Any],
-    match: str,
-    same_message: bool = True,
-) -> None:
-    """Asserts two constructors reject their arguments the same way.
-
-    Args:
-        pandas_build: A callable constructing the pandas wrapper.
-        spark_build: A callable constructing its Spark twin.
-        match: A regex both error messages must match.
-        same_message: Whether the two messages must be identical. They are, except
-            where the message names a domain -- the two domains have different
-            reprs.
-    """
-    pandas_outcome = _outcome(pandas_build)
-    spark_outcome = _outcome(spark_build)
-    assert pandas_outcome[0] == "error", (
-        f"The pandas wrapper was built, but its Spark twin gave {spark_outcome}."
-    )
-    assert spark_outcome[0] == "error", (
-        f"The Spark wrapper was built, but the pandas one gave {pandas_outcome}."
-    )
-    assert pandas_outcome[1] == spark_outcome[1], (
-        f"Different error types: pandas raised {pandas_outcome[1]} and Spark "
-        f"{spark_outcome[1]}."
-    )
-    for name, outcome in (("pandas", pandas_outcome), ("Spark", spark_outcome)):
-        assert re.search(match, outcome[2]), (
-            f"The {name} error message {outcome[2]!r} does not match {match!r}."
-        )
-    if same_message:
-        assert pandas_outcome[2] == spark_outcome[2], (
-            f"Different error messages: pandas raised {pandas_outcome[2]!r} and "
-            f"Spark {spark_outcome[2]!r}."
-        )
-
-
-################################################################################
 # Structure: what each wrapper builds
 ################################################################################
 
@@ -623,7 +560,7 @@ def test_dictionary_arguments_rejected_like_spark(
     wrapper is checked for both, since each is free to validate its own arguments
     first and raise something else.
     """
-    _assert_same_rejection(
+    assert_same_rejection(
         lambda: _build(wrapper, spark=False, **overrides),
         lambda: _build(wrapper, spark=True, **overrides),
         match=match,
@@ -704,7 +641,7 @@ def test_wrapper_arguments_rejected_like_spark(
     did not get crossed.
     """
     wrapper = _wrapper_named(wrapper_name)
-    _assert_same_rejection(
+    assert_same_rejection(
         lambda: _build(wrapper, spark=False, **overrides),
         lambda: _build(wrapper, spark=True, **overrides),
         match=match,
@@ -721,7 +658,7 @@ def test_map_value_rejects_a_nonaugmenting_transformer_like_spark():
     chooses that metric.
     """
     trusted_f = _label_function(tuple(SCHEMA))
-    _assert_same_rejection(
+    assert_same_rejection(
         lambda: MapValue(
             input_domain=INPUT_DOMAIN,
             input_metric=INPUT_METRIC,
@@ -809,51 +746,6 @@ def test_new_table_is_keyed_by_the_key_column(wrapper: Wrapper):
 ################################################################################
 # Differential tests against the Spark wrappers
 ################################################################################
-
-
-@contextmanager
-def _few_shuffle_partitions(spark: SparkSession, partitions: int = 4) -> Iterator[None]:
-    """Lowers Spark's shuffle partition count, restoring it on exit.
-
-    The truncating wrappers use window functions, so each shuffles; with the
-    default of 200 partitions the fixed per-partition overhead dominates the
-    runtime of these tiny frames. The partition count changes how much work Spark
-    does, not what it computes.
-
-    Args:
-        spark: The Spark session to configure.
-        partitions: The shuffle partition count to use.
-
-    Yields:
-        Nothing; the setting applies for the duration of the ``with`` block.
-    """
-    previous = spark.conf.get(_SHUFFLE_PARTITIONS_KEY, None)
-    spark.conf.set(_SHUFFLE_PARTITIONS_KEY, str(partitions))
-    try:
-        yield
-    finally:
-        if previous is None:
-            spark.conf.unset(_SHUFFLE_PARTITIONS_KEY)
-        else:
-            spark.conf.set(_SHUFFLE_PARTITIONS_KEY, previous)
-
-
-@pytest.fixture(name="utc_spark")
-def utc_spark_fixture(spark: SparkSession) -> Iterator[SparkSession]:
-    """Yields the session-scoped Spark session, configured for these tests.
-
-    The session timezone is UTC, which is what makes the corpus's naive timestamps
-    mean the same wall clock on both sides, and the shuffle partition count is
-    lowered. Both settings are restored afterwards.
-
-    Args:
-        spark: The session-scoped Spark session.
-
-    Yields:
-        The same Spark session.
-    """
-    with utc_session_timezone(spark), _few_shuffle_partitions(spark):
-        yield spark
 
 
 #: The column the companion table carries besides the key column, so that

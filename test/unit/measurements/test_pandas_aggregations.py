@@ -39,6 +39,8 @@ from test.unit.backend_testing import (
 )
 from test.unit.pandas_grouped_testing import (
     GROUPABLE_CASES,
+    key_schema,
+    keys_survive_spark_round_trip,
     pandas_domain,
     spark_domain,
     spark_frame,
@@ -51,7 +53,6 @@ import pandas as pd
 import pytest
 import sympy as sp
 from pyspark.sql import DataFrame, SparkSession
-from pyspark.sql.types import StructType
 
 from tmlt.core.domains.pandas_domains import (
     PandasGroupedTableDomain,
@@ -550,35 +551,6 @@ def test_chain_is_pandas_throughout(
 ################################################################################
 
 
-def _key_schema(case: EdgeCase) -> StructType:
-    """Returns the Spark schema of a case's grouping columns.
-
-    Args:
-        case: The corpus case whose grouping columns are wanted.
-    """
-    return StructType(
-        [field for field in case.spark_schema.fields if field.name in case.grouping]
-    )
-
-
-def _keys_survive_spark_round_trip(keys: pd.DataFrame, grouping: List[str]) -> bool:
-    """Returns whether a frame of group keys is unchanged by a Spark round trip.
-
-    A null survives ``toPandas()`` as a null only in an ``object`` column; in a
-    column ``toPandas()`` widens -- a nullable integer one, say -- it comes back
-    as a NaN, which the harness's comparison keys deliberately keep distinct
-    from a null.
-
-    Args:
-        keys: The group keys.
-        grouping: The grouping columns.
-    """
-    return not any(
-        keys[column].isna().any() and keys.dtypes[column] != np.dtype(object)
-        for column in grouping
-    )
-
-
 def _exact_pandas_counts(
     case: EdgeCase, frame: pd.DataFrame, keys: pd.DataFrame, factory: Any
 ) -> pd.DataFrame:
@@ -638,7 +610,7 @@ def _exact_spark_counts(
             input_domain=domain,
             input_metric=SymmetricDifference(),
             use_l2=False,
-            group_keys=spark_df_from_pandas(spark, keys, schema=_key_schema(case)),
+            group_keys=spark_df_from_pandas(spark, keys, schema=key_schema(case)),
         ),
     )
     return measurement(spark_frame(spark, case, frame))
@@ -686,7 +658,7 @@ def test_exact_counts_match_spark(
             Backend(name="spark"),
         )
     count_column = pandas_output.columns[-1]
-    if _keys_survive_spark_round_trip(keys, grouping):
+    if keys_survive_spark_round_trip(keys, grouping):
         assert_frames_equal_as_multisets(pandas_output, spark_output)
     else:
         # toPandas() rewrites the keys of some cases; see the note in

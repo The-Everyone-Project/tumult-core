@@ -50,7 +50,6 @@ from test.unit.backend_testing import (
     random_frame,
     spark_df_from_case,
     to_pandas,
-    utc_session_timezone,
 )
 from test.unit.transformations.pandas_transformations.structural_testing import (
     describable_cases,
@@ -58,7 +57,7 @@ from test.unit.transformations.pandas_transformations.structural_testing import 
     pandas_domain_for_case,
     spark_domain_for_case,
 )
-from typing import Any, Dict, Iterator, List, Sequence, Tuple
+from typing import Any, Dict, List, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -123,20 +122,6 @@ _SPARK_BACKEND = Backend(name="spark")
 ################################################################################
 # Fixtures and helpers
 ################################################################################
-
-
-@pytest.fixture(name="utc_spark")
-def utc_spark_fixture(spark: SparkSession) -> Iterator[SparkSession]:
-    """Yields the session-scoped Spark session, rendering timestamps as UTC.
-
-    Args:
-        spark: The session-scoped Spark session.
-
-    Yields:
-        The same Spark session.
-    """
-    with utc_session_timezone(spark):
-        yield spark
 
 
 def _sweep_cases(menu: Sequence[str]) -> List[EdgeCase]:

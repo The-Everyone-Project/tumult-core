@@ -5,7 +5,7 @@
 
 import datetime
 import textwrap
-from test.unit.backend_testing import is_null_value
+from test.unit.backend_testing import floating_array, is_null_value
 from test.unit.transformations.pandas_transformations.structural_testing import (
     assert_stability_parity,
 )
@@ -89,23 +89,6 @@ def _row_values(column: pd.Series, descriptor: PandasColumnDescriptor) -> List[s
         ),
     )
     return list(transformation(pd.DataFrame({"a": column}))["seen"])
-
-
-def _floating_array(values: List[float], mask: List[bool], size: int = 64) -> Any:
-    """Returns a nullable float array holding both NaNs and nulls.
-
-    A ``Series`` constructor cannot build one: it turns every NaN it is given
-    into a null. Only the array constructor takes the values and the mask
-    separately.
-
-    Args:
-        values: The values, with anything for the masked positions.
-        mask: Which positions are null.
-        size: The float size, 32 or 64.
-    """
-    return pd.arrays.FloatingArray(
-        np.array(values, dtype=np.dtype(f"float{size}")), np.array(mask, dtype=bool)
-    )
 
 
 INT_SCHEMA = {"a": PandasIntegerColumnDescriptor()}
@@ -508,7 +491,7 @@ def test_null_nan_inf():
     )
     df = pd.DataFrame(
         {
-            "a": _floating_array(
+            "a": floating_array(
                 [float("nan"), 0.0, float("inf"), 1.0, float("-nan")],
                 [False, True, False, False, False],
             )
@@ -576,7 +559,7 @@ def test_null_nan_inf():
     ),
     Case("Float64")(
         descriptor=PandasFloatColumnDescriptor(allow_nan=True, allow_null=True),
-        column=pd.Series(_floating_array([1.5, np.nan, 0.0], [False, False, True])),
+        column=pd.Series(floating_array([1.5, np.nan, 0.0], [False, False, True])),
         expected=["float:1.5", "float:nan", "NoneType:None"],
     ),
     Case("Float32")(
@@ -584,7 +567,7 @@ def test_null_nan_inf():
             allow_nan=True, allow_null=True, size=32
         ),
         column=pd.Series(
-            _floating_array([1.5, np.nan, 0.0], [False, False, True], size=32)
+            floating_array([1.5, np.nan, 0.0], [False, False, True], size=32)
         ),
         expected=["float:1.5", "float:nan", "NoneType:None"],
     ),

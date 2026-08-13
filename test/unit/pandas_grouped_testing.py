@@ -19,7 +19,7 @@ having each suite skip them.
 # Copyright Tumult Labs 2026
 
 from test.unit.backend_testing import EDGE_CASES, EdgeCase, spark_df_from_pandas
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -31,6 +31,7 @@ from pyspark.sql.types import (
     FloatType,
     LongType,
     StringType,
+    StructType,
     TimestampType,
 )
 
@@ -129,6 +130,35 @@ def spark_frame(spark: SparkSession, case: EdgeCase, frame: pd.DataFrame) -> Dat
         frame: The frame to convert.
     """
     return spark_df_from_pandas(spark, frame, schema=case.spark_schema)
+
+
+def key_schema(case: EdgeCase) -> StructType:
+    """Returns the Spark schema of a case's grouping columns.
+
+    Args:
+        case: The corpus case whose grouping columns are wanted.
+    """
+    return StructType(
+        [field for field in case.spark_schema.fields if field.name in case.grouping]
+    )
+
+
+def keys_survive_spark_round_trip(keys: pd.DataFrame, grouping: List[str]) -> bool:
+    """Returns whether a frame of group keys is unchanged by a Spark round trip.
+
+    A null survives ``toPandas()`` as a null only in an ``object`` column; in a
+    column ``toPandas()`` widens -- a nullable integer one, say -- it comes back
+    as a NaN, which the harness's comparison keys deliberately keep distinct
+    from a null.
+
+    Args:
+        keys: The group keys.
+        grouping: The grouping columns.
+    """
+    return not any(
+        keys[column].isna().any() and keys.dtypes[column] != np.dtype(object)
+        for column in grouping
+    )
 
 
 def _is_describable(case: EdgeCase) -> bool:

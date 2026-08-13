@@ -26,7 +26,7 @@ the rest of this module never starts a JVM.
 # Copyright Tumult Labs 2026
 
 import datetime
-from contextlib import contextmanager
+from test.unit.backend_testing import floating_array
 from test.unit.utils.truncation_testing import (
     EDGE_CASES,
     EDGE_CASES_BY_ID,
@@ -34,9 +34,8 @@ from test.unit.utils.truncation_testing import (
     EdgeCase,
     spark_df_from_case,
     spark_df_from_pandas,
-    utc_session_timezone,
 )
-from typing import Any, Dict, Iterator, List, Sequence, Set
+from typing import Any, Dict, List, Sequence, Set
 
 import numpy as np
 import pandas as pd
@@ -65,60 +64,6 @@ _GROUP_INDEX_COLUMN = "__group_index"
 #: Prefix distinguishing a group representative's columns from the columns of
 #: the frame it is joined to, which carry the same names.
 _REPRESENTATIVE_PREFIX = "__representative_"
-
-_SHUFFLE_PARTITIONS_KEY = "spark.sql.shuffle.partitions"
-
-
-################################################################################
-# Fixtures
-################################################################################
-
-
-@contextmanager
-def _few_shuffle_partitions(spark: SparkSession, partitions: int = 4) -> Iterator[None]:
-    """Lowers Spark's shuffle partition count, restoring it on exit.
-
-    Every differential test here shuffles, and with the default of 200
-    partitions the fixed per-partition overhead dominates the runtime of these
-    tiny frames. The partition count changes how much work Spark does, not
-    what it computes.
-
-    Args:
-        spark: The Spark session to configure.
-        partitions: The shuffle partition count to use.
-
-    Yields:
-        Nothing; the setting applies for the duration of the ``with`` block.
-    """
-    previous = spark.conf.get(_SHUFFLE_PARTITIONS_KEY, None)
-    spark.conf.set(_SHUFFLE_PARTITIONS_KEY, str(partitions))
-    try:
-        yield
-    finally:
-        if previous is None:
-            spark.conf.unset(_SHUFFLE_PARTITIONS_KEY)
-        else:
-            spark.conf.set(_SHUFFLE_PARTITIONS_KEY, previous)
-
-
-@pytest.fixture(name="utc_spark")
-def utc_spark_fixture(spark: SparkSession) -> Iterator[SparkSession]:
-    """Yields the session-scoped Spark session, configured for these tests.
-
-    The session timezone is UTC for the duration of each test, which is what
-    makes the naive timestamps of an edge case denote the same wall clock on
-    both sides, and the shuffle partition count is lowered. Both settings are
-    restored afterwards.
-
-    Args:
-        spark: The session-scoped Spark session.
-
-    Yields:
-        The same Spark session.
-    """
-    with utc_session_timezone(spark), _few_shuffle_partitions(spark):
-        yield spark
-
 
 ################################################################################
 # Helpers
@@ -251,28 +196,6 @@ def _first_occurrence_positions(df: pd.DataFrame, columns: Sequence[str]) -> Lis
     return positions
 
 
-def _float64_series(values: Sequence[float], mask: Sequence[bool]) -> pd.Series:
-    """Returns a ``Float64`` series holding NaN and ``pd.NA`` as different values.
-
-    Building the masked array directly is the only way to get both into one
-    nullable float column: every Series constructor coerces a ``np.nan`` in a
-    nullable float column to ``pd.NA``.
-
-    Args:
-        values: The values, with an arbitrary placeholder at the masked
-            positions.
-        mask: Whether each position holds ``pd.NA``.
-
-    Returns:
-        The assembled series.
-    """
-    return pd.Series(
-        pd.arrays.FloatingArray(
-            np.array(values, dtype=np.float64), np.array(mask, dtype=bool)
-        )
-    )
-
-
 ################################################################################
 # Differential tests against Spark
 ################################################################################
@@ -378,7 +301,9 @@ def test_row_keys_separates_nulls_from_nans_in_object_columns() -> None:
 
 def test_row_keys_separates_na_from_nan_in_nullable_float_columns() -> None:
     """``pd.NA`` and ``np.nan`` in a ``Float64`` column are different groups."""
-    df = pd.DataFrame({"v": _float64_series([1.0, np.nan, 0.0], [False, False, True])})
+    df = pd.DataFrame(
+        {"v": pd.Series(floating_array([1.0, np.nan, 0.0], [False, False, True]))}
+    )
     keys = row_keys(df)
     assert df["v"].dtype == pd.Float64Dtype()
     assert keys[1] != keys[2], "A NaN value and pd.NA are two groups."
@@ -393,7 +318,9 @@ def test_row_keys_merges_signed_zeros() -> None:
         keys = row_keys(df)
         assert keys[0] == keys[1], f"Signed zeros split in a {dtype} column."
         assert list(group_ids(df, ["v"])) == [0, 0]
-    nullable = pd.DataFrame({"v": _float64_series([0.0, -0.0], [False, False])})
+    nullable = pd.DataFrame(
+        {"v": pd.Series(floating_array([0.0, -0.0], [False, False]))}
+    )
     assert row_keys(nullable)[0] == row_keys(nullable)[1]
 
 

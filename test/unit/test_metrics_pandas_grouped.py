@@ -26,6 +26,7 @@ from test.unit.backend_testing import (
 )
 from test.unit.pandas_grouped_testing import (
     GROUPABLE_CASES,
+    key_schema,
     pandas_domain,
     spark_domain,
     spark_frame,
@@ -36,7 +37,6 @@ import pandas as pd
 import pytest
 import sympy as sp
 from pyspark.sql import SparkSession
-from pyspark.sql.types import StructType
 
 from tmlt.core.domains.pandas_domains import (
     PandasFloatColumnDescriptor,
@@ -205,17 +205,6 @@ def _discriminating_pairs(
     ]
 
 
-def _key_schema(case: EdgeCase) -> StructType:
-    """Returns the Spark schema of a case's grouping columns.
-
-    Args:
-        case: The corpus case whose grouping columns are wanted.
-    """
-    return StructType(
-        [field for field in case.spark_schema.fields if field.name in case.grouping]
-    )
-
-
 def _grouping_columns(case: EdgeCase) -> List[str]:
     """Returns a case's grouping columns, in its schema's order.
 
@@ -300,7 +289,7 @@ def test_aggregation_metric_distance_matches_spark(spark: SparkSession, case: Ed
     with utc_session_timezone(spark):
         spark_keys = spark.createDataFrame(
             [tuple(row) for row in keys.itertuples(index=False)],
-            schema=_key_schema(case),
+            schema=key_schema(case),
         )
         for metric in (
             SumOf(SymmetricDifference()),

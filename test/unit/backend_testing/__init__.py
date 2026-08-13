@@ -157,6 +157,7 @@ from test.unit.backend_testing.generation import (
     SIMPLE_DTYPE_MENU,
     ColumnKind,
     RandomLike,
+    floating_array,
     random_frame,
 )
 
@@ -185,6 +186,7 @@ __all__ = [
     "df_for",
     "domain_for",
     "exact_value",
+    "floating_array",
     "frame_row_ids",
     "grouped_symdiff_distance",
     "is_null_value",

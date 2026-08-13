@@ -447,15 +447,15 @@ def test_nothing_reindexes_the_frame_the_table_holds() -> None:
         {"A": ["a1", "a1", "a2", "a2"], "X": [2, 3, 5, -1]}, index=[10, 11, 12, 13]
     )
     frame_before = frame.copy()
-    indices = []
+    indices: List[List[int]] = []
+
+    def record(group: pd.DataFrame) -> int:
+        indices.append(list(group.index))
+        return len(group)
 
     for group_keys in (_KEYS, None):
         table = PandasGroupedTable(dataframe=frame, group_keys=group_keys)
-        table.agg(
-            lambda group: indices.append(list(group.index)) or len(group),
-            fill_value=0,
-            output_column="count",
-        )
+        table.agg(record, fill_value=0, output_column="count")
         table.agg_by_position(_size, fill_value=0, output_column="count")
         for group in table.get_groups().values():
             indices.append(list(group.index))

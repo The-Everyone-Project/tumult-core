@@ -14,11 +14,13 @@ and compare the counts. The rest of the suite mirrors
 
 import datetime
 import re
-from typing import Any, Dict, List, Optional, Tuple, Union
+from test.unit.transformations.pandas_transformations.structural_testing import (
+    assert_stability_parity,
+)
+from typing import Any, Dict, List, Optional, Union
 
 import pandas as pd
 import pytest
-import sympy as sp
 from pyspark.sql import SparkSession
 
 from tmlt.core.domains.pandas_domains import (
@@ -53,10 +55,6 @@ from tmlt.core.utils.testing import (
     parametrize,
 )
 
-#: The d_in values every stability function is pinned at, chosen to cover zero,
-#: one, a larger integer, a non-integral value and infinity.
-D_IN_GRID: Tuple[Any, ...] = (0, 1, 2, 7, sp.Integer(3) / 2, sp.oo)
-
 _DOMAIN = PandasTableDomain(
     {"A": PandasIntegerColumnDescriptor(), "B": PandasStringColumnDescriptor()}
 )
@@ -70,23 +68,6 @@ _SPARK_DOMAIN = SparkDataFrameDomain(
 )
 _FRAME = pd.DataFrame({"A": [1, 1, 2], "B": pd.Series(["X", "Y", "Z"], dtype=object)})
 _KEYS = pd.DataFrame({"A": [1, 2, 3]})
-
-
-def _outcome(call: Any, *args: Any) -> Any:
-    """Returns what a call returns, or a description of how it failed.
-
-    Two backends agree about a stability function when they return the same
-    value *and* when they reject the same inputs, so the comparison is made over
-    outcomes rather than return values.
-
-    Args:
-        call: The callable to run.
-        args: Its arguments.
-    """
-    try:
-        return call(*args)
-    except Exception as exception:
-        return (type(exception).__name__, str(exception))
 
 
 ################################################################################
@@ -403,10 +384,7 @@ def test_stability_function_matches_spark(
         use_l2=use_l2,
         group_keys=spark.createDataFrame(_KEYS),
     )
-    for d_in in D_IN_GRID:
-        assert _outcome(pandas_groupby.stability_function, d_in) == _outcome(
-            spark_transformation.stability_function, d_in
-        ), f"stability functions disagreed at d_in={d_in}"
+    assert_stability_parity(pandas_groupby, spark_transformation)
     assert pandas_groupby.stability_function(1) == ExactNumber(
         2 if input_metric == HammingDistance() else 1
     )

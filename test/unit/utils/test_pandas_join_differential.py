@@ -50,10 +50,11 @@ from test.unit.backend_testing import (
     Backend,
     assert_frames_equal_as_multisets,
     df_for,
+    floating_array,
     to_pandas,
     utc_session_timezone,
 )
-from typing import Optional, Sequence, Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -111,24 +112,6 @@ class NullKeyCase:
         return left, right
 
 
-def _floating(values: Sequence[float], mask: Sequence[bool]) -> pd.Series:
-    """Returns a ``Float64`` series holding both NaNs and nulls.
-
-    ``astype("Float64")`` would turn every NaN into a null; building the array
-    from its values and its mask is the only way to keep both in one column.
-
-    Args:
-        values: The underlying float values. A masked position's value is
-            never read.
-        mask: The positions that hold a null.
-    """
-    return pd.Series(
-        pd.arrays.FloatingArray(
-            np.array(values, dtype=np.float64), np.array(mask, dtype=bool)
-        )
-    )
-
-
 #: The join-key columns swept by the null-key matrix.
 #:
 #: Every case puts a matching pair of ordinary values on the two sides, a
@@ -151,8 +134,12 @@ NULL_KEY_CASES = [
     NullKeyCase(
         # The one pandas dtype that can hold a NaN and a null side by side.
         name="Float64-nan-and-na",
-        left=_floating([1.0, _NAN, 2.0, 0.0], [False, False, False, True]),
-        right=_floating([1.0, _NAN, 0.0, 3.0], [False, False, True, False]),
+        left=pd.Series(
+            floating_array([1.0, _NAN, 2.0, 0.0], [False, False, False, True])
+        ),
+        right=pd.Series(
+            floating_array([1.0, _NAN, 0.0, 3.0], [False, False, True, False])
+        ),
     ),
     NullKeyCase(
         name="Int64-na",

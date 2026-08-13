@@ -41,13 +41,12 @@ from tmlt.core.metrics import (
 from tmlt.core.transformations.pandas_transformations.map import (
     Map,
     RowToRowTransformation,
-    _is_missing,
-    _null_mask,
 )
 from tmlt.core.transformations.spark_transformations.map import Map as SparkMap
 from tmlt.core.transformations.spark_transformations.map import (
     RowToRowTransformation as SparkRowToRowTransformation,
 )
+from tmlt.core.utils.pandas_grouping import _is_null
 from tmlt.core.utils.testing import (
     Case,
     assert_property_immutability,
@@ -646,47 +645,12 @@ def test_a_nullable_string_column_supports_startswith():
     assert list(result["prefixed"]) == ["True", "False", "False", "False", "False"]
 
 
-def test_null_mask_matches_the_descriptors():
-    """The map's null mask is the one the descriptors validate columns with.
-
-    The implementation restates it rather than calling it, so that a change to
-    either has to be a deliberate change to both.
-    """
-    cases = [
-        (PandasStringColumnDescriptor(allow_null=True), pd.Series(["a", None, np.nan])),
-        (
-            PandasDateColumnDescriptor(allow_null=True),
-            pd.Series([datetime.date(2020, 1, 1), None], dtype=object),
-        ),
-        (PandasIntegerColumnDescriptor(), pd.Series([1, 2], dtype="int64")),
-        (
-            PandasIntegerColumnDescriptor(allow_null=True),
-            pd.Series([1, None], dtype="Int64"),
-        ),
-        (
-            PandasFloatColumnDescriptor(allow_nan=True),
-            pd.Series([1.0, np.nan], dtype="float64"),
-        ),
-        (
-            PandasFloatColumnDescriptor(allow_nan=True, allow_null=True),
-            pd.Series(_floating_array([1.0, np.nan, 0.0], [False, False, True])),
-        ),
-        (
-            PandasTimestampColumnDescriptor(allow_null=True),
-            pd.Series(pd.to_datetime(["2020-01-01", None])),
-        ),
-    ]
-    for descriptor, column in cases:
-        assert list(_null_mask(column, descriptor)) == list(
-            descriptor._null_mask(column)  # noqa: SLF001
-        ), f"null masks differ for {descriptor}"
-
-
-def test_is_missing_matches_the_harness_taxonomy():
+def test_is_null_matches_the_harness_taxonomy():
     """What the map treats as a returned missing value is the harness's taxonomy.
 
-    Both say ``None``, ``pd.NA`` and ``pd.NaT`` are missing values and a float
-    NaN is not.
+    The map classifies a value a function returned with
+    :func:`~tmlt.core.utils.pandas_grouping._is_null`, and both say ``None``,
+    ``pd.NA`` and ``pd.NaT`` are missing values and a float NaN is not.
     """
     values: List[Any] = [
         None,
@@ -701,7 +665,7 @@ def test_is_missing_matches_the_harness_taxonomy():
         datetime.date(2020, 1, 1),
     ]
     for value in values:
-        assert _is_missing(value) == is_null_value(value), f"disagreement on {value!r}"
+        assert _is_null(value) == is_null_value(value), f"disagreement on {value!r}"
 
 
 def test_returned_missing_values_become_the_dtypes_own_marker():

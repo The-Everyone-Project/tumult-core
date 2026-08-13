@@ -125,6 +125,7 @@ from tmlt.core.metrics import (
 from tmlt.core.transformations.base import Transformation
 from tmlt.core.utils.exact_number import ExactNumber, ExactNumberInput
 from tmlt.core.utils.misc import get_fullname
+from tmlt.core.utils.pandas_grouping import _is_null
 
 
 def _assert_row_matches_domain(row: Dict[str, Any], domain: PandasRowDomain) -> None:
@@ -147,20 +148,6 @@ def _assert_row_matches_domain(row: Dict[str, Any], domain: PandasRowDomain) -> 
             )
 
 
-def _is_missing(value: Any) -> bool:
-    """Returns True if ``value`` is one of pandas' missing-value markers.
-
-    A float NaN is deliberately not one of them: this classifies the values a
-    user function may *return* for a null, and a NaN returned for a float column
-    is a NaN. Which markers a *column* holds for a null is a per-dtype question,
-    answered by :func:`_null_mask`.
-
-    Args:
-        value: The value to check.
-    """
-    return value is None or value is pd.NA or value is pd.NaT
-
-
 def _is_nan(value: Any) -> bool:
     """Returns True if ``value`` is a float NaN.
 
@@ -168,29 +155,6 @@ def _is_nan(value: Any) -> bool:
         value: The value to check.
     """
     return isinstance(value, (float, np.floating)) and bool(np.isnan(value))
-
-
-def _null_mask(column: pd.Series, descriptor: PandasColumnDescriptor) -> np.ndarray:
-    """Returns the mask of the values of ``column`` that are missing values.
-
-    This restates
-    :meth:`~tmlt.core.domains.pandas_domains.PandasColumnDescriptor._null_mask`,
-    which is what decides the same question when a column is validated, rather
-    than calling it: the two are pinned against each other by
-    ``test_null_mask_matches_the_descriptors``. Its one subtlety is that a numpy
-    float column has no mask and so cannot hold a null at all, which makes its
-    NaNs NaNs; every other column's missing values are what
-    :meth:`pandas.Series.isna` reports.
-
-    Args:
-        column: The column to read.
-        descriptor: The descriptor the column is described by.
-    """
-    if isinstance(descriptor, PandasFloatColumnDescriptor) and not isinstance(
-        column.dtype, pd.api.extensions.ExtensionDtype
-    ):
-        return np.zeros(len(column), dtype=bool)
-    return np.asarray(column.isna())
 
 
 def _to_python_value(value: Any) -> Any:
@@ -220,8 +184,11 @@ def _rows_from_dataframe(
     """Returns a frame's rows as dicts, in the frame's row order.
 
     Missing values become ``None``, whatever marker the column holds them as;
-    see the module docstring for the full mapping. Columns of ``df`` that the
-    schema does not describe are not read.
+    see the module docstring for the full mapping. Which of a column's values
+    are missing is asked of the descriptor, so that a row's values are missing
+    exactly where the column's validation says they are -- in particular a numpy
+    float column has no mask and so cannot hold a null at all, which makes its
+    NaNs NaNs. Columns of ``df`` that the schema does not describe are not read.
 
     Args:
         df: The frame to read.
@@ -230,7 +197,7 @@ def _rows_from_dataframe(
     columns: Dict[str, List[Any]] = {}
     for name, descriptor in schema.items():
         column = df[name]
-        mask = _null_mask(column, descriptor)
+        mask = descriptor._null_mask(column)  # noqa: SLF001
         columns[name] = [
             None if missing else _to_python_value(value)
             for value, missing in zip(column, mask)
@@ -249,9 +216,10 @@ def _column_from_values(
 
     Args:
         values: The values of the column. A missing value may be given as any of
-            the markers :func:`_is_missing` recognizes, and -- for a column that
-            is not a floating point one, where a NaN is a value -- as a NaN;
-            each is stored as whatever the dtype's own marker is.
+            the markers :func:`~tmlt.core.utils.pandas_grouping._is_null`
+            recognizes, and -- for a column that is not a floating point one,
+            where a NaN is a value -- as a NaN; each is stored as whatever the
+            dtype's own marker is.
         descriptor: The descriptor whose canonical dtype the column takes.
     """
     dtype = descriptor.pandas_dtype
@@ -262,21 +230,21 @@ def _column_from_values(
             # A nullable float column is built from its values and its mask, so
             # that a NaN stays a NaN: every other way of building one -- the
             # Series constructor, astype, pd.array -- turns a NaN into a null.
-            mask = np.array([_is_missing(value) for value in values], dtype=bool)
+            mask = np.array([_is_null(value) for value in values], dtype=bool)
             data = np.array(
-                [0.0 if _is_missing(value) else value for value in values],
+                [0.0 if _is_null(value) else value for value in values],
                 dtype=descriptor.SIZE_TO_DTYPE[descriptor.size],
             )
             return pd.Series(pd.arrays.FloatingArray(data, mask))
         return pd.Series(
-            [None if _is_missing(value) else value for value in values], dtype=dtype
+            [None if _is_null(value) else value for value in values], dtype=dtype
         )
     # Every other column treats a NaN as a missing value, which is what
     # pandas.Series.isna reports for one. They are written as None, which pandas
     # stores as pd.NA or NaT where the dtype has a marker of its own, and leaves
     # as None in an object column.
     return pd.Series(
-        [None if _is_missing(value) or _is_nan(value) else value for value in values],
+        [None if _is_null(value) or _is_nan(value) else value for value in values],
         dtype=dtype,
     )
 

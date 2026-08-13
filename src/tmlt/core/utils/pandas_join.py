@@ -104,8 +104,8 @@ from tmlt.core.utils.join import (
 )
 from tmlt.core.utils.misc import get_nonconflicting_string
 from tmlt.core.utils.pandas_grouping import (
-    _is_null,
     _missing_is_null,
+    _null_and_nan_masks,
     group_codes,
     row_keys,
 )
@@ -623,9 +623,10 @@ def _null_mask(column: pd.Series) -> np.ndarray:
     the rows whose group is the null group.
 
     Only the positions ``pandas.Series.isna`` reports -- which over-approximates
-    the nulls, since it also reports NaNs -- are examined one at a time. A
-    column whose every missing entry is a null, such as a categorical one, is
-    not examined at all; see
+    the nulls, since it also reports NaNs -- are examined one at a time, which
+    is what :func:`tmlt.core.utils.pandas_grouping._null_and_nan_masks` does;
+    its null mask is this one. A column whose every missing entry is a null,
+    such as a categorical one, is not examined at all; see
     :func:`tmlt.core.utils.pandas_grouping._missing_is_null`.
 
     Args:
@@ -634,11 +635,7 @@ def _null_mask(column: pd.Series) -> np.ndarray:
     missing = column.isna().to_numpy()
     if not missing.any() or _missing_is_null(column.dtype):
         return missing
-    values = column.to_numpy(dtype=object)
-    nulls = np.zeros(len(column), dtype=bool)
-    for position in np.flatnonzero(missing):
-        nulls[position] = _is_null(values[position])
-    return nulls
+    return _null_and_nan_masks(column.to_numpy(dtype=object))[0]
 
 
 ################################################################################

@@ -8,10 +8,10 @@ Copyright Tumult Labs 2026
 How to turn a commit of this branch into the three platform wheels that the
 Difference Engine and the Tumult Analytics fork install by URL. It describes
 the process that produced `0.19.1+ep.pandas.1`, generalised to
-`0.19.1+ep.backend.2`.
+`0.19.1+ep.backend.3`.
 
 Nothing here publishes to PyPI, and nothing here should. The fork's version is
-a PEP 440 *local version* (`0.19.1+ep.backend.2`); PyPI structurally rejects
+a PEP 440 *local version* (`0.19.1+ep.backend.3`); PyPI structurally rejects
 those, which is exactly why the scheme was chosen — a fork build can never be
 mistaken for, or shadowed by, an upstream release.
 
@@ -110,18 +110,18 @@ The tag is the version with `+` and `.` turned into `-`:
 | Version | Tag |
 | --- | --- |
 | `0.19.1+ep.pandas.1` | `0.19.1-ep-pandas-1` |
-| `0.19.1+ep.backend.2` | `0.19.1-ep-backend-2` |
+| `0.19.1+ep.backend.3` | `0.19.1-ep-backend-3` |
 
 `nox -s make-release` is not usable here: it insists on a semantic version, on
 the `main` branch, and it rewrites the changelog. Tag by hand, annotated and
 signed, following `0.19.1-ep-pandas-1`:
 
 ```sh
-git tag -s 0.19.1-ep-backend-2 -m "tmlt.core 0.19.1+ep.backend.2" -m \
-"Official tmlt.core 0.19.1 plus the pandas backend (work packages C1-C11)
-and the fixes from its code review. Not an official Tumult Labs release;
-never published to PyPI."
-git push origin 0.19.1-ep-backend-2
+git tag -s 0.19.1-ep-backend-3 -m "tmlt.core 0.19.1+ep.backend.3" -m \
+"Official tmlt.core 0.19.1 plus the pandas backend (work packages C1-C11),
+the fixes from its code review, and the reuse and efficiency changes of the
+simplify pass. Not an official Tumult Labs release; never published to PyPI."
+git push origin 0.19.1-ep-backend-3
 ```
 
 The push triggers `release.yml`, because its trigger is `tags: - '**'`.
@@ -138,8 +138,8 @@ address them by their `releases/download/<tag>/<file>` URLs.
 
 ```sh
 gh run download <run-id> -D dist/
-gh release create 0.19.1-ep-backend-2 \
-  --title "tmlt.core 0.19.1+ep.backend.2" \
+gh release create 0.19.1-ep-backend-3 \
+  --title "tmlt.core 0.19.1+ep.backend.3" \
   --notes "Fork build. Not an official Tumult Labs release; never on PyPI." \
   dist/*/*.whl dist/*/*.tar.gz
 ```
@@ -147,10 +147,10 @@ gh release create 0.19.1-ep-backend-2 \
 Expected asset names:
 
 ```
-tmlt_core-0.19.1+ep.backend.2-py3-none-macosx_11_0_arm64.whl
-tmlt_core-0.19.1+ep.backend.2-py3-none-macosx_11_0_x86_64.whl
-tmlt_core-0.19.1+ep.backend.2-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
-tmlt_core-0.19.1+ep.backend.2.tar.gz
+tmlt_core-0.19.1+ep.backend.3-py3-none-macosx_11_0_arm64.whl
+tmlt_core-0.19.1+ep.backend.3-py3-none-macosx_11_0_x86_64.whl
+tmlt_core-0.19.1+ep.backend.3-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+tmlt_core-0.19.1+ep.backend.3.tar.gz
 ```
 
 ## Step 4: repoint the consumers
@@ -193,14 +193,14 @@ print(__version__)
 "
 ```
 
-The version must print `0.19.1+ep.backend.2`. `uv pip show tmlt-core` should
+The version must print `0.19.1+ep.backend.3`. `uv pip show tmlt-core` should
 report it too — if it reports plain `0.19.1`, something resolved the PyPI wheel
 and the whole pin is not doing its job.
 
 ## Notes on the version scheme
 
 * PEP 440 ignores the local segment when matching a specifier, so
-  `0.19.1+ep.backend.2` satisfies `tmlt.core >=0.19.1,<0.20` exactly as plain
+  `0.19.1+ep.backend.3` satisfies `tmlt.core >=0.19.1,<0.20` exactly as plain
   `0.19.1` does. That is what makes the fork build a drop-in for
   `tmlt.analytics`.
 * Local segments compare *alphanumerically*, so `+ep.backend.1` sorts before

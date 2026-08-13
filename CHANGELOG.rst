@@ -3,8 +3,14 @@
 Changelog
 =========
 
-0.19.1+ep.backend.3 (unreleased)
+.. _v0.19.1-ep-backend-3:
+
+0.19.1+ep.backend.3 - 2026-08-13
 --------------------------------
+A fork build: official tmlt.core 0.19.1, everything in the Unreleased section
+below -- the pandas backend work packages -- and the reuse and efficiency
+changes listed here. Not an official Tumult Labs release, and never published
+to PyPI.
 
 Changed
 ~~~~~~~

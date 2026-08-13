@@ -96,7 +96,7 @@ domain does.
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Tumult Labs 2026
 
-from typing import Any, Callable, Dict, List, Union
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -367,6 +367,14 @@ class RowToRowTransformation(Transformation):
         )
         self._trusted_f = trusted_f
         self._augment = augment
+        # The output schema is read once per row, so it is read once here
+        # instead: the property hands out a copy of it every time.
+        self._output_schema = output_domain.schema
+        self._output_columns = list(self._output_schema)
+        self._map_output_memo: Tuple[Optional[FrozenSet[str]], PandasRowDomain] = (
+            None,
+            output_domain,
+        )
 
     @property
     def trusted_f(self) -> Callable[[Dict[str, Any]], Dict[str, Any]]:
@@ -389,6 +397,33 @@ class RowToRowTransformation(Transformation):
         No values are valid for input/output metrics of this transformation.
         """
         return False
+
+    def _map_output_domain(self, row: Dict[str, Any]) -> PandasRowDomain:
+        """Returns the domain of what ``trusted_f`` must return for such a row.
+
+        An augmenting function returns the output columns the row does not
+        already carry, so this depends on the row's *columns* and not on its
+        values -- and every row of a frame has the same columns. The last one
+        built is therefore remembered: building it copies the output schema and
+        checks every descriptor in it, which is per-row work with a per-frame
+        answer. The memo is a single attribute, so a caller mapping two frames
+        at once sees one of the two domains rather than half of each.
+
+        Args:
+            row: The row being mapped.
+        """
+        columns, domain = self._map_output_memo
+        row_columns = frozenset(row)
+        if columns != row_columns:
+            domain = PandasRowDomain(
+                {
+                    column: descriptor
+                    for column, descriptor in self._output_schema.items()
+                    if column not in row_columns
+                }
+            )
+            self._map_output_memo = (row_columns, domain)
+        return domain
 
     def __call__(self, row: Dict[str, Any]) -> Dict[str, Any]:
         """Map row.
@@ -420,14 +455,11 @@ class RowToRowTransformation(Transformation):
             )
         assert isinstance(self.output_domain, PandasRowDomain)
         if self._augment:
-            expected_map_output_domain = PandasRowDomain(
-                {k: v for k, v in self.output_domain.schema.items() if k not in row}
-            )
-            _assert_row_matches_domain(mapped_row, expected_map_output_domain)
+            _assert_row_matches_domain(mapped_row, self._map_output_domain(row))
             augmented_row = {**mapped_row, **row}
-            return {k: augmented_row[k] for k in self.output_domain.schema}
+            return {k: augmented_row[k] for k in self._output_columns}
         _assert_row_matches_domain(mapped_row, self.output_domain)
-        return {k: mapped_row[k] for k in self.output_domain.schema}
+        return {k: mapped_row[k] for k in self._output_columns}
 
 
 class Map(Transformation):

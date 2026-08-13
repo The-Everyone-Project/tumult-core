@@ -16,6 +16,30 @@ Changed
   are gone. The two backends have to agree about which joins are legal and about
   which output columns can hold a null, and sharing the code is what guarantees
   they keep agreeing. No behavior changed.
+- The pandas grouped aggregations count without materializing a frame per group.
+  :class:`~tmlt.core.utils.pandas_grouped_table.PandasGroupedTable` grew
+  ``agg_by_position``, which hands an aggregation the *positions* of a group's
+  rows rather than the rows themselves; it makes every promise ``agg`` makes
+  about the output. The two count transformations in
+  :mod:`tmlt.core.transformations.pandas_transformations.agg` use it, and
+  ``CountDistinctGrouped`` additionally numbers the frame's rows once for the
+  whole frame rather than once per group -- two rows are the same row, or not,
+  wherever they sit. On 200k rows in 1000 groups the count is 65% cheaper and
+  the distinct count 87% cheaper, for identical answers.
+- :func:`tmlt.core.utils.pandas_join.join` numbers two join columns of the same
+  dtype together, by grouping the concatenation of the two, instead of numbering
+  each side and reconciling the two numberings through a Python key per distinct
+  value. Join columns of *different* dtypes -- an ``int64`` joined to an
+  ``Int64`` -- still take the reconciling path, since concatenating those would
+  have pandas choose a common dtype for them. Joining on 100k distinct keys is
+  92% cheaper for object keys and 96% for integers, with byte-identical
+  numbering.
+- An augmenting
+  :class:`~tmlt.core.transformations.pandas_transformations.map.RowToRowTransformation`
+  builds the domain it validates its function's output against once per set of
+  row columns rather than once per row. It depends on the row's columns and not
+  on its values, and every row of a frame has the same columns. Mapping 200k
+  rows of 6 columns is 54% cheaper.
 
 Unreleased
 ----------

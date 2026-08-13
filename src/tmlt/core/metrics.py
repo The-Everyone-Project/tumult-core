@@ -1249,9 +1249,7 @@ class IfGroupedBy(ExactNumberMetric):
         # help mypy
         assert isinstance(domain, SparkDataFrameDomain)
 
-        ordered_groupby_columns = [
-            column for column in domain.schema.keys() if column in self.columns
-        ]
+        ordered_groupby_columns = self._ordered_groupby_columns(domain)
 
         groupby_keys = (
             value1.select(ordered_groupby_columns)
@@ -1269,6 +1267,21 @@ class IfGroupedBy(ExactNumberMetric):
         )
         self.validate(distance)
         return distance
+
+    def _ordered_groupby_columns(
+        self, domain: Union[SparkDataFrameDomain, PandasTableDomain]
+    ) -> List[str]:
+        """Returns the columns grouped by, in the domain's column order.
+
+        :attr:`columns` is a set, so it has an order of its own that has nothing
+        to do with the table's. Both backends' branches of :meth:`distance` need
+        the table's, since that is the order the group keys they select come out
+        in.
+
+        Args:
+            domain: The domain of the tables being compared, of either backend.
+        """
+        return [column for column in domain.schema if column in self.columns]
 
     def _pandas_distance(
         self, value1: pd.DataFrame, value2: pd.DataFrame, domain: PandasTableDomain
@@ -1288,9 +1301,7 @@ class IfGroupedBy(ExactNumberMetric):
             value2: An element of the domain.
             domain: The domain the two tables belong to.
         """
-        ordered_groupby_columns = [
-            column for column in domain.schema.keys() if column in self.columns
-        ]
+        ordered_groupby_columns = self._ordered_groupby_columns(domain)
 
         key_frames = [value[ordered_groupby_columns] for value in (value1, value2)]
         # Concatenating only the non-empty frames keeps the dtypes of the

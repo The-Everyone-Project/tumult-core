@@ -40,6 +40,9 @@ Changed
   row columns rather than once per row. It depends on the row's columns and not
   on its values, and every row of a frame has the same columns. Mapping 200k
   rows of 6 columns is 54% cheaper.
+- Both backend arms of :meth:`.IfGroupedBy.distance` ask one helper for the
+  groupby columns in the table's own column order, rather than each writing out
+  the same comprehension over the domain's schema. No behavior changed.
 
 Unreleased
 ----------

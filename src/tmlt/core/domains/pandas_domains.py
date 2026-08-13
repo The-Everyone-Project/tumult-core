@@ -38,8 +38,10 @@ from typing import (
     ClassVar,
     Collection,
     Dict,
+    Generic,
     Mapping,
     Sequence,
+    TypeVar,
     Union,
 )
 
@@ -104,68 +106,36 @@ class PandasSeriesDomain(Domain):
 PandasColumnsDescriptor = Dict[str, PandasSeriesDomain]
 """Mapping from column name to column domain."""
 
+_SchemaValue = TypeVar("_SchemaValue", bound=Formattable)
+"""What a schema describes a column with: a domain, or a column descriptor."""
 
-class PandasDataFrameDomain(Domain):
-    """Domain of Pandas DataFrames."""
+
+class _PandasSchemaDomain(Domain, Generic[_SchemaValue]):
+    """Base of the pandas domains that describe a table column by column.
+
+    Every domain in this module is a mapping from column name to a description
+    of that column -- a :class:`PandasSeriesDomain` for
+    :class:`PandasDataFrameDomain`, a :class:`PandasColumnDescriptor` for the
+    others -- and holds it the same way: in a private dict, handed out as a
+    copy, compared as an ordered mapping, and rendered as labeled siblings.
+    That, and the check that a frame has the schema's columns in its order, is
+    what lives here. What a carrier is, and what else makes one valid, belongs
+    to the subclasses.
+    """
 
     FORMAT_EXCLUDED_ATTRS = Domain.FORMAT_EXCLUDED_ATTRS | {"schema"}
+    """Attributes hidden from output when formatting this domain. @nodoc"""
 
-    @typechecked
-    def __init__(self, schema: PandasColumnsDescriptor):
-        """Constructor.
-
-        Args:
-            schema: Mapping from column name to column domain.
-        """
-        self._schema = schema.copy()
+    _schema: Dict[str, _SchemaValue]
 
     def __repr__(self) -> str:
         """Return string representation of the object."""
         return f"{self.__class__.__name__}(schema={self._schema})"
 
     @property
-    def schema(self) -> PandasColumnsDescriptor:
-        """Returns mapping from column name to associated domain."""
+    def schema(self) -> Dict[str, _SchemaValue]:
+        """Returns mapping from column name to that column's description."""
         return self._schema.copy()
-
-    @property
-    def carrier_type(self) -> type:
-        """Returns carrier type for the domain."""
-        return pd.DataFrame
-
-    def validate(self, value: Any) -> None:
-        """Raises error if value is not a Pandas DataFrame with matching schema."""
-        super().validate(value)
-        value_columns = list(value.columns)
-        if len(value_columns) > len(set(value_columns)):
-            duplicates = set(
-                col for col in value_columns if value_columns.count(col) > 1
-            )
-            raise OutOfDomainError(
-                self, value, f"Some columns are duplicated, {sorted(duplicates)}"
-            )
-
-        schema_columns = list(self.schema.keys())
-        if value_columns != schema_columns:
-            raise OutOfDomainError(
-                self,
-                value,
-                (
-                    "Columns are not as expected. DataFrame and Domain must contain"
-                    " the same columns in the same order.\nDataFrame columns:"
-                    f" {value_columns}\nDomain columns: {schema_columns}"
-                ),
-            )
-
-        for column in self.schema:
-            try:
-                self.schema[column].validate(value[column])
-            except OutOfDomainError as exception:
-                raise OutOfDomainError(
-                    self,
-                    value,
-                    f"Found invalid value in column '{column}': {exception}",
-                ) from exception
 
     def __eq__(self, other: Any) -> bool:
         """Return True if the classes are equivalent."""
@@ -178,6 +148,65 @@ class PandasDataFrameDomain(Domain):
         if not self._schema:
             return ""
         return format_labeled_siblings(self._schema.items())
+
+    def _validate_columns(self, value: pd.DataFrame) -> None:
+        """Raises error unless a frame's columns are the schema's, in its order.
+
+        Args:
+            value: The DataFrame to check.
+        """
+        value_columns = list(value.columns)
+        if len(value_columns) > len(set(value_columns)):
+            duplicates = set(
+                col for col in value_columns if value_columns.count(col) > 1
+            )
+            raise OutOfDomainError(
+                self, value, f"Some columns are duplicated, {sorted(duplicates)}"
+            )
+
+        schema_columns = list(self._schema)
+        if value_columns != schema_columns:
+            raise OutOfDomainError(
+                self,
+                value,
+                (
+                    "Columns are not as expected. DataFrame and Domain must contain"
+                    " the same columns in the same order.\nDataFrame columns:"
+                    f" {value_columns}\nDomain columns: {schema_columns}"
+                ),
+            )
+
+
+class PandasDataFrameDomain(_PandasSchemaDomain[PandasSeriesDomain]):
+    """Domain of Pandas DataFrames."""
+
+    @typechecked
+    def __init__(self, schema: PandasColumnsDescriptor):
+        """Constructor.
+
+        Args:
+            schema: Mapping from column name to column domain.
+        """
+        self._schema = schema.copy()
+
+    @property
+    def carrier_type(self) -> type:
+        """Returns carrier type for the domain."""
+        return pd.DataFrame
+
+    def validate(self, value: Any) -> None:
+        """Raises error if value is not a Pandas DataFrame with matching schema."""
+        super().validate(value)
+        self._validate_columns(value)
+        for column, element_domain in self._schema.items():
+            try:
+                element_domain.validate(value[column])
+            except OutOfDomainError as exception:
+                raise OutOfDomainError(
+                    self,
+                    value,
+                    f"Found invalid value in column '{column}': {exception}",
+                ) from exception
 
     @classmethod
     def from_numpy_types(cls, dtypes: Dict[str, np.dtype]) -> "PandasDataFrameDomain":
@@ -1009,7 +1038,64 @@ class PandasTimestampColumnDescriptor(PandasColumnDescriptor):
         super()._validate_dtype(column)
 
 
-class PandasTableDomain(Domain):
+class _PandasDescriptorDomain(_PandasSchemaDomain[PandasColumnDescriptor]):
+    """Base of the domains describing columns with a :class:`PandasColumnDescriptor`.
+
+    They are built the same way, which is what lives here: the schema is copied
+    into a dict of its own, and every value in it is checked to be a descriptor.
+    """
+
+    @typechecked
+    def __init__(self, schema: PandasTableColumnsDescriptor):
+        """Constructor.
+
+        Args:
+            schema: Mapping from column names to column descriptors.
+        """
+        self._schema = dict(schema.items())
+        # TODO(#2727): Remove this check once we update typeguard to ^3.0.0
+        for key, domain in self._schema.items():
+            if not isinstance(domain, PandasColumnDescriptor):
+                raise TypeError(
+                    f"Expected domain for key '{key}' to be a "
+                    f"{get_fullname(PandasColumnDescriptor)}; got "
+                    f"{get_fullname(domain)} instead"
+                )
+
+
+class _PandasDescribedTableDomain(_PandasDescriptorDomain):
+    """Base of the domains whose carrier is a table described by descriptors.
+
+    :class:`PandasTableDomain` describes a DataFrame and
+    :class:`PandasGroupedTableDomain` a grouped one; either way there is a
+    column to look up and a dtype for each column, which is what lives here.
+    """
+
+    FORMAT_EXCLUDED_ATTRS = _PandasDescriptorDomain.FORMAT_EXCLUDED_ATTRS | {
+        "pandas_dtypes"
+    }
+    """Attributes hidden from output when formatting this domain. @nodoc"""
+
+    @property
+    def pandas_dtypes(self) -> Dict[str, PandasDtype]:
+        """Returns the canonical dtype of each column according to the domain.
+
+        Note:
+            There isn't a one-to-one correspondence between these dtypes and
+            the domains, since the domains encode additional information --
+            about nulls in an integer column, or nans and infs in a float one --
+            that a dtype cannot represent, and since a column may validly have a
+            dtype other than its canonical one; see
+            :attr:`PandasColumnDescriptor.accepted_dtypes`.
+        """
+        return {col: desc.pandas_dtype for col, desc in self._schema.items()}
+
+    def __getitem__(self, col_name: str) -> PandasColumnDescriptor:
+        """Returns column descriptor for given column."""
+        return self._schema[col_name]
+
+
+class PandasTableDomain(_PandasDescribedTableDomain):
     """Domain of pandas DataFrames described by column descriptors.
 
     This is the pandas counterpart of
@@ -1037,105 +1123,26 @@ class PandasTableDomain(Domain):
         one frame at one moment, and pandas offers no way to freeze it.
     """
 
-    FORMAT_EXCLUDED_ATTRS = Domain.FORMAT_EXCLUDED_ATTRS | {"schema", "pandas_dtypes"}
-
-    @typechecked
-    def __init__(self, schema: PandasTableColumnsDescriptor):
-        """Constructor.
-
-        Args:
-            schema: Mapping from column names to column descriptors.
-        """
-        self._schema = dict(schema.items())
-        # TODO(#2727): Remove this check once we update typeguard to ^3.0.0
-        for key, domain in self._schema.items():
-            if not isinstance(domain, PandasColumnDescriptor):
-                raise TypeError(
-                    f"Expected domain for key '{key}' to be a "
-                    f"{get_fullname(PandasColumnDescriptor)}; got "
-                    f"{get_fullname(domain)} instead"
-                )
-
-    def __repr__(self) -> str:
-        """Return string representation of the object."""
-        return f"{self.__class__.__name__}(schema={self.schema})"
-
-    @property
-    def schema(self) -> PandasTableColumnsDescriptor:
-        """Returns mapping from column names to column descriptors."""
-        return self._schema.copy()
-
     @property
     def carrier_type(self) -> type:
         """Returns carrier type for the domain."""
         return pd.DataFrame
-
-    @property
-    def pandas_dtypes(self) -> Dict[str, PandasDtype]:
-        """Returns the canonical dtype of each column according to the domain.
-
-        Note:
-            There isn't a one-to-one correspondence between these dtypes and
-            PandasTableDomain objects, since the domains encode additional
-            information -- about nulls in an integer column, or nans and infs in
-            a float one -- that a dtype cannot represent, and since a column may
-            validly have a dtype other than its canonical one; see
-            :attr:`PandasColumnDescriptor.accepted_dtypes`.
-        """
-        return {col: desc.pandas_dtype for col, desc in self.schema.items()}
 
     def validate(self, value: Any) -> None:
         """Raises error if value is not a DataFrame with matching schema."""
         super().validate(value)
         # assertion to help mypy understand the type
         assert isinstance(value, pd.DataFrame)
-
-        value_columns = list(value.columns)
-        if len(value_columns) > len(set(value_columns)):
-            duplicates = set(
-                col for col in value_columns if value_columns.count(col) > 1
-            )
-            raise OutOfDomainError(
-                self, value, f"Some columns are duplicated, {sorted(duplicates)}"
-            )
-
-        schema_columns = list(self.schema.keys())
-        if value_columns != schema_columns:
-            raise OutOfDomainError(
-                self,
-                value,
-                (
-                    "Columns are not as expected. DataFrame and Domain must contain"
-                    " the same columns in the same order.\nDataFrame columns:"
-                    f" {value_columns}\nDomain columns: {schema_columns}"
-                ),
-            )
-
-        for column in self.schema:
+        self._validate_columns(value)
+        for column, descriptor in self._schema.items():
             try:
-                self.schema[column].validate_column(value, column)
+                descriptor.validate_column(value, column)
             except ValueError as exception:
                 raise OutOfDomainError(
                     self,
                     value,
                     f"Found invalid value in column '{column}': {exception}",
                 ) from exception
-
-    def __eq__(self, other: Any) -> bool:
-        """Return True if the classes are equivalent."""
-        if self.__class__ != other.__class__:
-            return False
-        return OrderedDict(self.schema) == OrderedDict(other.schema)
-
-    def __getitem__(self, col_name: str) -> PandasColumnDescriptor:
-        """Returns column descriptor for given column."""
-        return self.schema[col_name]
-
-    def _format_children(self) -> str:
-        """Render the column schema as labeled siblings."""
-        if not self._schema:
-            return ""
-        return format_labeled_siblings(self._schema.items())
 
     def project(self, cols: Sequence[str]) -> "PandasTableDomain":
         """Project this domain to a subset of columns.
@@ -1156,7 +1163,7 @@ class PandasTableDomain(Domain):
         )
 
 
-class PandasGroupedTableDomain(Domain):
+class PandasGroupedTableDomain(_PandasDescribedTableDomain):
     """Domain of grouped pandas tables.
 
     This is the pandas counterpart of
@@ -1191,9 +1198,6 @@ class PandasGroupedTableDomain(Domain):
         True
     """  # noqa: E501
 
-    FORMAT_EXCLUDED_ATTRS = Domain.FORMAT_EXCLUDED_ATTRS | {"schema", "pandas_dtypes"}
-    """Attributes hidden from output when formatting this domain. @nodoc"""
-
     @typechecked
     def __init__(
         self,
@@ -1223,20 +1227,7 @@ class PandasGroupedTableDomain(Domain):
             if isinstance(schema[column], PandasFloatColumnDescriptor):
                 raise ValueError(f"Can not group by a floating point column: {column}")
 
-        self._schema = dict(schema.items())
-        # TODO(#2727): Remove this check once we update typeguard to ^3.0.0
-        for key, domain in self._schema.items():
-            if not isinstance(domain, PandasColumnDescriptor):
-                raise TypeError(
-                    f"Expected domain for key '{key}' to be a "
-                    f"{get_fullname(PandasColumnDescriptor)}; got "
-                    f"{get_fullname(domain)} instead"
-                )
-
-    @property
-    def schema(self) -> PandasTableColumnsDescriptor:
-        """Returns mapping from column names to column descriptors."""
-        return self._schema.copy()
+        super().__init__(schema)
 
     @property
     def groupby_columns(self) -> frozenset[str]:
@@ -1259,16 +1250,6 @@ class PandasGroupedTableDomain(Domain):
         )
 
         return PandasGroupedTable
-
-    @property
-    def pandas_dtypes(self) -> Dict[str, PandasDtype]:
-        """Returns the canonical dtype of each column according to the domain.
-
-        Note:
-            As for :attr:`PandasTableDomain.pandas_dtypes`, this is not a
-            complete description of the domain; see that attribute's note.
-        """
-        return {col: desc.pandas_dtype for col, desc in self.schema.items()}
 
     def validate(self, value: Any) -> None:
         """Raises error if value is not a PandasGroupedTable with matching keys."""
@@ -1320,26 +1301,12 @@ class PandasGroupedTableDomain(Domain):
 
     def __eq__(self, other: Any) -> bool:
         """Return True if the schemas and group keys are identical."""
-        if self.__class__ != other.__class__:
+        if not super().__eq__(other):
             return False
-        if OrderedDict(self.schema) != OrderedDict(other.schema):
-            return False
-        if self.groupby_columns != other.groupby_columns:
-            return False
-        return True
-
-    def __getitem__(self, col_name: str) -> PandasColumnDescriptor:
-        """Returns column descriptor for given column."""
-        return self.schema[col_name]
-
-    def _format_children(self) -> str:
-        """Render the column schema as labeled siblings."""
-        if not self._schema:
-            return ""
-        return format_labeled_siblings(self._schema.items())
+        return self.groupby_columns == other.groupby_columns
 
 
-class PandasRowDomain(Domain):
+class PandasRowDomain(_PandasDescriptorDomain):
     """Domain of pandas DataFrame rows.
 
     This is the pandas counterpart of
@@ -1371,34 +1338,6 @@ class PandasRowDomain(Domain):
         :meth:`PandasColumnDescriptor.valid_py_value` on a row's values.
     """
 
-    FORMAT_EXCLUDED_ATTRS = Domain.FORMAT_EXCLUDED_ATTRS | {"schema"}
-
-    @typechecked
-    def __init__(self, schema: PandasTableColumnsDescriptor):
-        """Constructor.
-
-        Args:
-            schema: Mapping from column names to column descriptors.
-        """
-        self._schema = dict(schema.items())
-        # TODO(#2727): Remove this check once we update typeguard to ^3.0.0
-        for key, domain in self._schema.items():
-            if not isinstance(domain, PandasColumnDescriptor):
-                raise TypeError(
-                    f"Expected domain for key '{key}' to be a "
-                    f"{get_fullname(PandasColumnDescriptor)}; got "
-                    f"{get_fullname(domain)} instead"
-                )
-
-    def __repr__(self) -> str:
-        """Return string representation of the object."""
-        return f"{self.__class__.__name__}(schema={self.schema})"
-
-    @property
-    def schema(self) -> PandasTableColumnsDescriptor:
-        """Returns mapping from column names to column descriptors."""
-        return self._schema.copy()
-
     def validate(self, value: Any) -> None:
         """Raises error if value is not a row with matching schema."""
         raise NotImplementedError()
@@ -1407,19 +1346,7 @@ class PandasRowDomain(Domain):
         """Returns True if value is a row with matching schema."""
         raise NotImplementedError()
 
-    def __eq__(self, other: Any) -> bool:
-        """Return True if the classes are equivalent."""
-        if self.__class__ != other.__class__:
-            return False
-        return OrderedDict(self.schema) == OrderedDict(other.schema)
-
     @property
     def carrier_type(self) -> type:
         """Returns carrier type for members of PandasRowDomain."""
         return dict
-
-    def _format_children(self) -> str:
-        """Render the column schema as labeled siblings."""
-        if not self._schema:
-            return ""
-        return format_labeled_siblings(self._schema.items())

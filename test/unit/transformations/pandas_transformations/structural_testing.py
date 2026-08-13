@@ -263,6 +263,16 @@ def labelled_value(value: Any) -> str:
     (:class:`pandas.Timestamp` against :class:`datetime.datetime`), and
     ``isoformat`` renders both identically.
 
+    This is the strict refinement of
+    :func:`~test.unit.backend_testing.comparison.label_value`, which keeps a
+    null apart from a NaN and renders everything else with its ``repr``. That
+    is enough to label a *cell* of a frame the harness is comparing, where both
+    sides are pandas by then, and not enough for a value a user function was
+    handed inside a backend: the timestamp Spark hands over is a
+    :class:`datetime.datetime` and the one pandas hands over is a
+    :class:`pandas.Timestamp`, and their reprs differ. Use ``label_value``
+    unless the value came from inside a backend.
+
     Args:
         value: The value to render.
     """

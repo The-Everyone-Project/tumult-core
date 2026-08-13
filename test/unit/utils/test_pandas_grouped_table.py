@@ -295,6 +295,64 @@ def test_agg_groups_null_keys() -> None:
 
 
 ################################################################################
+# agg_by_position
+################################################################################
+
+
+def _size(positions: np.ndarray) -> int:
+    """Returns how many positions there are.
+
+    Args:
+        positions: One group's row positions.
+    """
+    return int(positions.size)
+
+
+@parametrize(
+    Case("groups")(group_keys=_KEYS),
+    Case("empty-group-keys")(group_keys=pd.DataFrame({"A": []})),
+    Case("total")(group_keys=None),
+)
+def test_agg_by_position_agrees_with_agg(group_keys: Optional[pd.DataFrame]) -> None:
+    """Counting positions is counting rows, output frame for output frame."""
+    table = PandasGroupedTable(dataframe=_FRAME, group_keys=group_keys)
+    pd.testing.assert_frame_equal(
+        table.agg_by_position(_size, fill_value=0, output_column="count"),
+        table.agg(len, fill_value=0, output_column="count"),
+    )
+
+
+def test_agg_by_position_of_an_empty_frame() -> None:
+    """An empty frame fills every group key, and a total aggregation's one row."""
+    empty = _FRAME.iloc[:0]
+    grouped = PandasGroupedTable(dataframe=empty, group_keys=_KEYS)
+    pd.testing.assert_frame_equal(
+        grouped.agg_by_position(_size, fill_value=-1, output_column="count"),
+        pd.DataFrame({"A": ["a0", "a1"], "count": [-1, -1]}),
+    )
+    total = PandasGroupedTable(dataframe=empty, group_keys=None)
+    pd.testing.assert_frame_equal(
+        total.agg_by_position(_size, fill_value=-1, output_column="count"),
+        pd.DataFrame({"count": [-1]}),
+    )
+
+
+def test_agg_by_position_passes_the_groups_positions() -> None:
+    """The positions are the group's rows in the table, in ascending order."""
+    frame = pd.DataFrame({"A": ["a1", "a2", "a1", "a1"], "X": [1, 2, 3, 4]})
+    seen = {}
+
+    def record(positions: np.ndarray) -> int:
+        seen[frame["A"][positions[0]]] = list(positions)
+        return int(positions.size)
+
+    PandasGroupedTable(
+        dataframe=frame, group_keys=pd.DataFrame({"A": ["a1", "a2"]})
+    ).agg_by_position(record, fill_value=0, output_column="count")
+    assert seen == {"a1": [0, 2, 3], "a2": [1]}
+
+
+################################################################################
 # get_groups and select
 ################################################################################
 
@@ -375,6 +433,38 @@ def test_nothing_modifies_the_input_frames() -> None:
 
     pd.testing.assert_frame_equal(frame, frame_before)
     pd.testing.assert_frame_equal(keys, keys_before)
+
+
+def test_nothing_reindexes_the_frame_the_table_holds() -> None:
+    """A frame with an index of its own comes back with it, and its groups do not.
+
+    The per-group selections are reindexed in place, which costs nothing
+    because a selection is already a copy. The frame the table holds is not one
+    of those, and reindexing *it* in place would reindex the caller's frame
+    under it -- the one way this optimization can go wrong.
+    """
+    frame = pd.DataFrame(
+        {"A": ["a1", "a1", "a2", "a2"], "X": [2, 3, 5, -1]}, index=[10, 11, 12, 13]
+    )
+    frame_before = frame.copy()
+    indices = []
+
+    for group_keys in (_KEYS, None):
+        table = PandasGroupedTable(dataframe=frame, group_keys=group_keys)
+        table.agg(
+            lambda group: indices.append(list(group.index)) or len(group),
+            fill_value=0,
+            output_column="count",
+        )
+        table.agg_by_position(_size, fill_value=0, output_column="count")
+        for group in table.get_groups().values():
+            indices.append(list(group.index))
+
+    # Every frame handed out is indexed from zero: the "a1" group's two rows,
+    # then get_groups' empty "a0" and its "a1", then the whole frame for the
+    # total aggregation (whose get_groups has no groups to hand out).
+    assert indices == [[0, 1], [], [0, 1], [0, 1, 2, 3]]
+    pd.testing.assert_frame_equal(frame, frame_before)
 
 
 def test_agg_output_is_not_a_view_of_the_group_keys() -> None:

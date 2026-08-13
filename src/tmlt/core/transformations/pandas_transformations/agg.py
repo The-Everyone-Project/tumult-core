@@ -38,21 +38,20 @@ from tmlt.core.utils.pandas_grouped_table import PandasGroupedTable
 from tmlt.core.utils.pandas_grouping import group_ids
 
 
-def _count_rows(group: pd.DataFrame) -> int:
+def _count_rows(positions: np.ndarray) -> int:
     """Returns the number of rows in a group.
 
     Args:
-        group: One group's rows.
-
-    Note:
-        Not ``group.count()``, which in pandas is the number of non-null values
-        of each column rather than the number of rows.
+        positions: The positions of one group's rows, as
+            :meth:`~.PandasGroupedTable.agg_by_position` hands them over. A
+            count needs nothing else, and asking for the rows themselves would
+            mean copying them out of the table first.
     """
-    return len(group)
+    return int(positions.size)
 
 
-def _count_distinct_rows(group: pd.DataFrame) -> int:
-    """Returns the number of distinct rows in a group.
+def _row_ids(df: pd.DataFrame) -> np.ndarray:
+    """Returns one id per distinct row of a frame, over every column.
 
     Rows are compared over *every* column, the grouping columns included, and
     with :func:`~tmlt.core.utils.pandas_grouping.group_ids`' notion of equality,
@@ -61,10 +60,27 @@ def _count_distinct_rows(group: pd.DataFrame) -> int:
     holding a null counts, where ``count_distinct`` would drop it, and a null is
     distinct from a NaN.
 
+    Row identity is a property of the whole frame rather than of a group -- two
+    rows are the same row, or not, wherever they sit -- so this is computed once
+    for the frame and every group reads its own rows' ids out of it. Numbering
+    each group's rows separately, which is what asking a group-shaped
+    aggregation for its distinct rows would do, repeats the whole comparison per
+    group.
+
     Args:
-        group: One group's rows.
+        df: The frame whose rows are numbered.
     """
-    return int(np.unique(group_ids(group, list(group.columns))).size)
+    return group_ids(df, list(df.columns))
+
+
+def _count_distinct_rows(row_ids: np.ndarray, positions: np.ndarray) -> int:
+    """Returns the number of distinct rows among a group's rows.
+
+    Args:
+        row_ids: The whole frame's row ids, as :func:`_row_ids` returns them.
+        positions: The positions of one group's rows.
+    """
+    return int(np.unique(row_ids[positions]).size)
 
 
 def _groupby_columns_schema(
@@ -245,7 +261,7 @@ class CountGrouped(Transformation):
 
     def __call__(self, grouped_data: PandasGroupedTable) -> pd.DataFrame:
         """Returns a DataFrame containing counts for each group."""
-        result = grouped_data.agg(
+        result = grouped_data.agg_by_position(
             func=_count_rows, fill_value=0, output_column=self.count_column
         )
         # Ensure the new column has the expected output type. Counts are
@@ -417,8 +433,11 @@ class CountDistinctGrouped(Transformation):
         # Note: this cannot use a pandas nunique, which -- like the Spark
         # implementation's count_distinct, and for the same reason -- ignores
         # rows with nulls.
-        result = grouped_data.agg(
-            func=_count_distinct_rows, fill_value=0, output_column=self.count_column
+        row_ids = _row_ids(grouped_data.dataframe)
+        result = grouped_data.agg_by_position(
+            func=lambda positions: _count_distinct_rows(row_ids, positions),
+            fill_value=0,
+            output_column=self.count_column,
         )
         # Ensure the new column has the expected output type.
         return _with_count_dtype(result, self.count_column, self.output_domain)

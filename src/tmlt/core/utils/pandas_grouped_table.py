@@ -36,6 +36,14 @@ The aggregation interface:
     callable over a group's rows, which carries the computation alone. The
     output column's name is therefore a separate argument. See
     :meth:`PandasGroupedTable.agg` for the full contract.
+
+    :meth:`PandasGroupedTable.agg_by_position` is the same aggregation over the
+    *positions* of a group's rows rather than over the rows themselves, for the
+    aggregations that do not need the values. Spark has no counterpart because
+    it needs none: a ``Column`` expression is compiled rather than called, so a
+    count there never materializes anything. Here, handing a callable a group's
+    rows means copying them out of the table first, which for a count is the
+    whole of the cost.
 """
 
 # SPDX-License-Identifier: Apache-2.0
@@ -45,9 +53,15 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+import numpy as np
 import pandas as pd
 
-from tmlt.core.utils.pandas_grouping import distinct_rows, group_indices, row_keys
+from tmlt.core.utils.pandas_grouping import (
+    _reindexed_from_zero,
+    distinct_rows,
+    group_indices,
+    row_keys,
+)
 
 
 class PandasGroupedTable:
@@ -220,22 +234,86 @@ class PandasGroupedTable:
             # it means func is never handed an empty group here either.
             if len(self._dataframe) == 0:
                 return pd.DataFrame({output_column: [fill_value]})
+            # reset_index rather than _reindexed_from_zero: this is the frame
+            # this table holds, not a fresh selection out of it, and reindexing
+            # it in place would reindex the caller's frame.
             return pd.DataFrame(
-                {output_column: [func(self._reindexed(self._dataframe))]}
+                {output_column: [func(self._dataframe.reset_index(drop=True))]}
             )
 
+        return self._by_group(
+            lambda positions: func(self._rows_at(positions)), fill_value, output_column
+        )
+
+    def agg_by_position(
+        self,
+        func: Callable[[np.ndarray], Any],
+        fill_value: Any,
+        output_column: str,
+    ) -> pd.DataFrame:
+        """Applies given function to the row positions of each group.
+
+        This is :meth:`agg` for an aggregation that only needs to know *which*
+        rows a group holds. It makes every promise :meth:`agg` makes about the
+        output -- one row per group key, in :attr:`group_keys`' order, indexed
+        from zero, with ``fill_value`` for the keys with no rows -- and differs
+        only in what ``func`` is handed.
+
+        The grouping has already computed those positions, so an aggregation
+        taking them pays nothing per group beyond its own work, where one taking
+        a frame pays for a copy of the group's rows first. See this module's
+        docstring for why both entry points exist.
+
+        Args:
+            func: Function to apply to each non-empty group. It is called with
+                the positions of that group's rows in :attr:`dataframe`, as an
+                array in ascending order, and must return a single value. It
+                must not modify that array.
+            fill_value: Output value for empty groups.
+            output_column: Name of the column holding the aggregated values.
+        """
+        if self._group_keys is None:
+            if len(self._dataframe) == 0:
+                return pd.DataFrame({output_column: [fill_value]})
+            return pd.DataFrame(
+                {output_column: [func(np.arange(len(self._dataframe)))]}
+            )
+
+        return self._by_group(func, fill_value, output_column)
+
+    def _by_group(
+        self,
+        func: Callable[[np.ndarray], Any],
+        fill_value: Any,
+        output_column: str,
+    ) -> pd.DataFrame:
+        """Returns one row per group key, holding ``func`` of the group's positions.
+
+        This is the body both aggregation methods share, and where the promises
+        about the output live: which rows come out, and in what order.
+
+        Args:
+            func: The aggregation, over a non-empty group's row positions.
+            fill_value: Output value for empty groups.
+            output_column: Name of the column holding the aggregated values.
+        """
+        assert self._group_keys is not None
         positions_by_key = group_indices(self._dataframe, self._groupby_columns)
         values = [
-            (
-                func(self._reindexed(self._dataframe.iloc[positions_by_key[key]]))
-                if key in positions_by_key
-                else fill_value
-            )
+            func(positions_by_key[key]) if key in positions_by_key else fill_value
             for key in row_keys(self._group_keys, self._groupby_columns)
         ]
         output = self._group_keys.copy()
         output[output_column] = _aggregated_column(values, output.index)
         return output.reset_index(drop=True)
+
+    def _rows_at(self, positions: np.ndarray) -> pd.DataFrame:
+        """Returns the rows at the given positions, indexed from zero.
+
+        Args:
+            positions: The positions of the rows to take.
+        """
+        return _reindexed_from_zero(self._dataframe.iloc[positions])
 
     def get_groups(self) -> Dict[Tuple[Any, ...], pd.DataFrame]:
         r"""Returns the groups as a dictionary of DataFrames.
@@ -267,17 +345,10 @@ class PandasGroupedTable:
                 if key in positions_by_key
                 else self._dataframe.iloc[:0]
             )
-            groups[key] = self._reindexed(rows[non_grouping_columns])
+            # Selecting a list of columns is a copy of its own, so the frame
+            # reindexed in place here is never one anything else holds.
+            groups[key] = _reindexed_from_zero(rows[non_grouping_columns])
         return groups
-
-    @staticmethod
-    def _reindexed(df: pd.DataFrame) -> pd.DataFrame:
-        """Returns a frame indexed from zero, without modifying its argument.
-
-        Args:
-            df: The frame to reindex.
-        """
-        return df.reset_index(drop=True)
 
 
 def concat_rows(frames: Sequence[pd.DataFrame]) -> pd.DataFrame:

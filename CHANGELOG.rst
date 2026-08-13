@@ -162,6 +162,38 @@ Changed
   none of which is Spark-specific, so it can be the base class of both backends'
   wrappers. It is re-exported under its old name, and the Spark wrappers derived from
   it are unchanged, so nothing that imports it moves.
+- Both backends' ``GroupBy`` now put their group keys' columns in the input
+  domain's order, whatever order they were given in, and the Spark grouped
+  aggregations build their output schema by walking that domain's schema rather
+  than iterating the ``groupby_columns`` frozenset, as the pandas ones already
+  did. An aggregation emits its groupby columns in the group keys' order and
+  declares them in the schema's order, and nothing validates that those agree,
+  so this is a fix as well as a change: group keys built from a keyset whose
+  columns are not in the input domain's order produced an output frame that the
+  transformation's own output domain rejected, and Spark's *declared* order
+  additionally depended on ``PYTHONHASHSEED`` and so varied from run to run.
+  **This changes the column order of such an aggregation's result**, on both
+  backends at once so that they stay in step; an aggregation whose keyset was
+  already in the input domain's order is unaffected.
+- :func:`~tmlt.core.utils.exact_number.ExactNumber` remembers the conversion of
+  the integers and strings it is built from, up to a bounded number of them.
+  Building the :class:`sympy.Expr` -- ``sympy.simplify`` above all -- dominates
+  the cost of an :class:`~.ExactNumber`, and a privacy calculation builds tens
+  of thousands of them from a handful of distinct values. A ``sympy.Expr`` is
+  immutable, so sharing one between callers changes nothing but the cost;
+  floats and booleans are deliberately not remembered, since each hashes and
+  compares equal to an integer and would share its entry.
+- Deleted the re-exports in
+  :mod:`tmlt.core.transformations.pandas_transformations`' ``__init__``, which
+  nothing imported, matching the Spark package's. Import the leaf modules, as
+  everything already did.
+- The two grouped-domain arms of :meth:`.SymmetricDifference.distance`,
+  :meth:`.AggregationMetric.distance` and
+  :meth:`.AggregationMetric.supports_domain`, and the two backend arms of
+  :meth:`.AddRemoveKeys.distance`, are each one arm now: the algorithm was the
+  same in both, and only how a group is asked whether it is empty, or how a
+  dataframe's keys are enumerated and its rows selected, actually differed. No
+  behavior changed.
 
 Fixed
 ~~~~~
@@ -177,6 +209,57 @@ Fixed
   otherwise, rather than building a session. That fallback matters because the
   active session is thread-scoped while the hook runs on the main thread, so a
   session built on a worker thread is not found by the first lookup alone.
+- :class:`tmlt.core.measurements.pandas_measurements.table.AddNoiseToColumn`
+  resolves the dtype of the column it noises when it is built rather than when
+  the column is written. A mechanism that was a *subclass* of one of the four
+  it knows -- which the Spark twin handles by asking the mechanism for its
+  ``output_type`` -- raised a bare :class:`KeyError` out of ``__call__``, after
+  the noise had been drawn and the budget spent. Subclasses are accepted now,
+  and a mechanism that cannot be resolved is reported when the measurement is
+  constructed.
+- The column descriptors in :mod:`tmlt.core.domains.pandas_domains` and a column
+  they describe now agree about which of its values are null. The per-value
+  check recognised ``float("nan")`` but not ``numpy.float32("nan")`` -- which is
+  not a :class:`float`, where a ``numpy.float64`` is -- nor a raw
+  ``numpy.datetime64("NaT")``, while :meth:`pandas.Series.isna`, which column
+  validation goes through, makes no such distinction: an object column holding a
+  ``float32`` NaN validated while the same value, handed to a map function's
+  output row, did not. A NaN in a *float* column is still a value gated by
+  ``allow_nan``, as before.
+- :meth:`.PandasTimestampColumnDescriptor.valid_py_value` no longer accepts
+  ``NaT`` when ``allow_null`` is False. ``NaTType`` subclasses
+  :class:`datetime.datetime`, so a ``NaT`` was answered as an ordinary
+  timezone-naive timestamp and the nullability branch was dead. It also rejects
+  a value outside :attr:`pandas.Timestamp.min`/:attr:`~pandas.Timestamp.max`,
+  which a described column's canonical ``datetime64[ns]`` dtype cannot hold:
+  such a value passed validation and then failed, as a raw
+  ``OutOfBoundsDatetime``, inside whatever went on to build the column. This is
+  narrower than Spark's ``TimestampType``, which covers years 1 to 9999, and is
+  documented on the descriptor as the engine limit it is.
+- :func:`tmlt.core.utils.pandas_join.join` brings two ``datetime64`` join
+  columns to the finer of their two units before comparing them, and returns the
+  output join column in that unit. On pandas 2 the two sides need not be in the
+  same unit; the output column was built in the left frame's dtype, so a
+  right-only ``12:00:00.500`` came back as ``12:00:00`` against a left column of
+  seconds, and a value outside the nanosecond range crashed with a
+  pandas-internal ``AssertionError``. A value the finer unit cannot represent is
+  now reported by name, with the column and both units.
+- :func:`tmlt.core.utils.pandas_join.join` rejects two categorical join columns
+  whose categories differ, instead of running as an inner or left join and
+  raising a bare ``TypeError`` from inside pandas as an outer or right one.
+- A categorical column's missing entries are nulls to
+  :mod:`tmlt.core.utils.pandas_grouping` and to the join built on it. A
+  categorical spells one as the code ``-1``, which reads back as ``np.nan`` --
+  in a float or object column a *value* here, but in a categorical the only
+  spelling there is, since pandas does not allow a NaN to be a category. They
+  were grouped as NaNs, which gave a left join's fill of a categorical payload
+  column a group of its own rather than the null group, and made
+  ``nulls_are_equal`` inert for a categorical key.
+- :class:`~tmlt.core.transformations.pandas_transformations.map.RowToRowTransformation`
+  reports a map function that returns something other than a :class:`dict` --
+  a :class:`~pyspark.sql.Row`, say, which the Spark implementation accepts --
+  with an :class:`~.OutOfDomainError` naming what was returned and what is
+  wanted, rather than with a bare assert that ``-O`` strips.
 
 .. _v0.19.1:
 

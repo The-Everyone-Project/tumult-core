@@ -2,6 +2,21 @@
 
 Changelog
 ==
+0.19.1+ep.backend.3 (unreleased)
+--------------------------------
+
+Changed
+~~~~~~~
+
+- The column-name validation and the nullability algebra a join's output domain
+  is computed with are shared between the two backends rather than copied.
+  :mod:`tmlt.core.utils.join` grew ``_validate_join_columns``, ``_join_flag``,
+  ``_join_allows_null`` and ``_side_unmatchable``, which
+  :mod:`tmlt.core.utils.pandas_join` now calls; the pandas module's own copies
+  are gone. The two backends have to agree about which joins are legal and about
+  which output columns can hold a null, and sharing the code is what guarantees
+  they keep agreeing. No behavior changed.
+
 Unreleased
 ----------
 

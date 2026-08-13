@@ -89,11 +89,19 @@ from tmlt.core.domains.pandas_domains import (
     PandasTimestampColumnDescriptor,
 )
 
-# The column algebra is backend-neutral -- these two functions manipulate lists
-# of names and nothing else -- so it is imported rather than mirrored: the two
-# backends' output columns and their order have to be identical, and sharing the
-# code is the only way to guarantee that they stay so.
-from tmlt.core.utils.join import columns_after_join, natural_join_columns
+# The column algebra is backend-neutral -- these functions manipulate lists of
+# names, join types and flags, and nothing else -- so it is imported rather than
+# mirrored: the two backends' output columns, their order and their nullability
+# have to be identical, and sharing the code is the only way to guarantee that
+# they stay so.
+from tmlt.core.utils.join import (
+    _join_allows_null,
+    _join_flag,
+    _side_unmatchable,
+    _validate_join_columns,
+    columns_after_join,
+    natural_join_columns,
+)
 from tmlt.core.utils.misc import get_nonconflicting_string
 from tmlt.core.utils.pandas_grouping import (
     _is_null,
@@ -101,10 +109,6 @@ from tmlt.core.utils.pandas_grouping import (
     group_codes,
     row_keys,
 )
-
-#: The join types :func:`join` accepts, as
-#: :func:`tmlt.core.utils.join.join` accepts them.
-JOIN_TYPES = frozenset({"left", "right", "inner", "outer", "left_anti"})
 
 #: The join types :func:`domain_after_join` accepts.
 DOMAIN_JOIN_TYPES = ("left", "right", "inner", "outer")
@@ -141,81 +145,6 @@ _KEY_COLUMN = "value"
 
 
 @typechecked
-def _validate_join_columns(
-    left_columns: List[str],
-    right_columns: List[str],
-    on: Optional[List[str]],
-    how: str,
-) -> None:
-    """Check for any problems in the join that the column names alone reveal.
-
-    This is the part of :func:`tmlt.core.utils.join._validate_join` that does
-    not look at column types, split out because :func:`join` and
-    :func:`domain_after_join` have different things to say about types -- one
-    has dtypes and the other descriptors -- while the checks here are word for
-    word the Spark implementation's.
-
-    Checks:
-
-        - The join involves at least one column.
-        - Join columns are in both tables.
-        - None of the column names are duplicated in any of the inputs.
-        - No name collisions when adding _left or _right to a column name.
-
-    Args:
-        left_columns: Columns of the left table.
-        right_columns: Columns of the right table.
-        on: Columns to join on. If None, join on all columns with the same name.
-        how: Join type.
-    """
-    if on is None:
-        on = natural_join_columns(left_columns, right_columns)
-    if len(on) == 0:
-        raise ValueError("Join must involve at least one column.")
-    for column in on:
-        if column not in left_columns:
-            raise ValueError(f"Join column '{column}' not in the left table.")
-        if column not in right_columns:
-            raise ValueError(f"Join column '{column}' not in the right table.")
-    if len(set(on)) != len(on):
-        raise ValueError("Join columns (`on`) contain duplicates.")
-    if len(set(left_columns)) != len(left_columns):
-        raise ValueError("Left columns contain duplicates.")
-    if len(set(right_columns)) != len(right_columns):
-        raise ValueError("Right columns contain duplicates.")
-
-    if how not in JOIN_TYPES:
-        raise ValueError(
-            "Join type (`how`) must be one of 'left', 'right', 'inner', 'outer', or "
-            f"'left_anti', not '{how}'."
-        )
-
-    if how != "left_anti":
-        columns_from_left_names = [
-            column + "_left" if column in right_columns else column
-            for column in left_columns
-            if column not in on
-        ]
-        columns_from_right_names = [
-            column + "_right" if column in left_columns else column
-            for column in right_columns
-            if column not in on
-        ]
-        seen_columns = set()
-        duplicate_columns = []
-        for column in columns_from_left_names + columns_from_right_names:
-            if column not in seen_columns:
-                seen_columns.add(column)
-            else:
-                duplicate_columns.append(column)
-        if duplicate_columns:
-            raise ValueError(
-                f"Name collision, {duplicate_columns} would appear more than once in "
-                "the output."
-            )
-
-
-@typechecked
 def _validate_join(
     left_schema: PandasTableColumnsDescriptor,
     right_schema: PandasTableColumnsDescriptor,
@@ -225,8 +154,10 @@ def _validate_join(
     """Check for any problems in the join of two described tables.
 
     This is :func:`tmlt.core.utils.join._validate_join` over pandas
-    descriptors: the column-name checks plus the requirement that the join
-    columns describe the same kind of value. The kinds are named by
+    descriptors: the shared column-name checks of
+    :func:`tmlt.core.utils.join._validate_join_columns` plus the requirement
+    that the join columns describe the same kind of value. The kinds are named
+    by
     :meth:`~tmlt.core.domains.pandas_domains.PandasColumnDescriptor.to_spark_descriptor`,
     so that a mismatch is reported in the same words on both backends.
 
@@ -518,14 +449,15 @@ def domain_after_join(
             assert right_descriptor is not None
             output_descriptors[output_column] = dataclasses.replace(  # type: ignore
                 right_descriptor,
-                allow_null=right_descriptor.allow_null or how in ["left", "outer"],
+                allow_null=right_descriptor.allow_null
+                or _side_unmatchable("right", how),
             )
             continue
         if right_descriptor is None:
             assert left_descriptor is not None
             output_descriptors[output_column] = dataclasses.replace(  # type: ignore
                 left_descriptor,
-                allow_null=left_descriptor.allow_null or how in ["right", "outer"],
+                allow_null=left_descriptor.allow_null or _side_unmatchable("left", how),
             )
             continue
         assert left_descriptor is not None
@@ -534,20 +466,12 @@ def domain_after_join(
         assert output_column in on
 
         # All column types are nullable
-        allow_null = None
-        if how == "left":
-            allow_null = left_descriptor.allow_null
-        elif how == "right":
-            allow_null = right_descriptor.allow_null
-        elif how == "inner":
-            allow_null = (
-                left_descriptor.allow_null and right_descriptor.allow_null
-                if nulls_are_equal
-                else False
-            )
-        elif how == "outer":
-            allow_null = left_descriptor.allow_null or right_descriptor.allow_null
-        assert allow_null is not None
+        allow_null = _join_allows_null(
+            left_descriptor.allow_null,
+            right_descriptor.allow_null,
+            how,
+            nulls_are_equal,
+        )
         new_descriptor: PandasColumnDescriptor
         if isinstance(left_descriptor, PandasIntegerColumnDescriptor):
             assert isinstance(right_descriptor, PandasIntegerColumnDescriptor)
@@ -557,22 +481,12 @@ def domain_after_join(
             )
         elif isinstance(left_descriptor, PandasFloatColumnDescriptor):
             assert isinstance(right_descriptor, PandasFloatColumnDescriptor)
-            allow_nan = None
-            allow_inf = None
-            if how == "left":
-                allow_nan = left_descriptor.allow_nan
-                allow_inf = left_descriptor.allow_inf
-            elif how == "right":
-                allow_nan = right_descriptor.allow_nan
-                allow_inf = right_descriptor.allow_inf
-            elif how == "inner":
-                allow_nan = left_descriptor.allow_nan and right_descriptor.allow_nan
-                allow_inf = left_descriptor.allow_inf and right_descriptor.allow_inf
-            elif how == "outer":
-                allow_nan = left_descriptor.allow_nan or right_descriptor.allow_nan
-                allow_inf = left_descriptor.allow_inf or right_descriptor.allow_inf
-            assert allow_nan is not None
-            assert allow_inf is not None
+            allow_nan = _join_flag(
+                how, left_descriptor.allow_nan, right_descriptor.allow_nan
+            )
+            allow_inf = _join_flag(
+                how, left_descriptor.allow_inf, right_descriptor.allow_inf
+            )
             assert left_descriptor.size == right_descriptor.size
             new_descriptor = PandasFloatColumnDescriptor(
                 allow_nan=allow_nan,
@@ -1006,8 +920,8 @@ def _join_on_ids(
     # Which side the join can leave without a matching row, and so which side's
     # columns need somewhere to put a missing value before the merge rather
     # than after it.
-    left_unmatchable = how in ("right", "outer")
-    right_unmatchable = how in ("left", "outer")
+    left_unmatchable = _side_unmatchable("left", how)
+    right_unmatchable = _side_unmatchable("right", how)
 
     names = _NameSource(list(left.columns) + list(right.columns) + list(output_columns))
     id_names = {column: names.take() for column in on}
@@ -1154,11 +1068,12 @@ def _key_dtype(
 ) -> PandasDtype:
     """Returns the dtype an output join column comes back in.
 
-    Whether the column can hold a null is decided exactly as
-    :func:`domain_after_join` decides a join column's ``allow_null``, reading
-    each side's dtype for whether it could hold one in the first place. The
-    values themselves are the left frame's wherever it has any, so the left
-    frame's dtype is the one that is widened or narrowed.
+    Whether the column can hold a null is decided by the same
+    :func:`~tmlt.core.utils.join._join_allows_null` that gives a join column its
+    ``allow_null`` in :func:`domain_after_join`, reading each side's dtype for
+    whether it could hold one in the first place. The values themselves are the
+    left frame's wherever it has any, so the left frame's dtype is the one that
+    is widened or narrowed.
 
     Args:
         left_dtype: The left frame's join column dtype.
@@ -1166,15 +1081,7 @@ def _key_dtype(
         how: The join type.
         nulls_are_equal: If True, treats null values as equal.
     """
-    left_null = _can_hold_null(left_dtype)
-    right_null = _can_hold_null(right_dtype)
-    allow_null: bool
-    if how == "left":
-        allow_null = left_null
-    elif how == "right":
-        allow_null = right_null
-    elif how == "inner":
-        allow_null = (left_null and right_null) if nulls_are_equal else False
-    else:
-        allow_null = left_null or right_null
+    allow_null = _join_allows_null(
+        _can_hold_null(left_dtype), _can_hold_null(right_dtype), how, nulls_are_equal
+    )
     return _target_dtype(left_dtype, allow_null)

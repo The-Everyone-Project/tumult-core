@@ -255,7 +255,7 @@ def _to_sympy(value: "ExactNumberInput") -> sp.Expr:
     if isinstance(value, ExactNumber):
         return value.expr
     if type(value) in _MEMOIZED_INPUT_TYPES:
-        return _memoized_to_sympy(value)  # type: ignore[arg-type]
+        return _memoized_to_sympy(value)
     return _converted_to_sympy(value)
 
 

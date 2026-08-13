@@ -2,6 +2,7 @@
 
 import itertools
 from fractions import Fraction
+from typing import ClassVar
 from unittest import TestCase
 
 import sympy as sp
@@ -207,7 +208,7 @@ class TestToSympyMemo(TestCase):
     """The memo in front of the conversion changes nothing but its cost."""
 
     #: One value of every input type, and the ExactNumber each must give.
-    CASES = [
+    CASES: ClassVar = [
         (5, "5"),
         (-1000000000000000, "-1000000000000000"),
         (0, "0"),

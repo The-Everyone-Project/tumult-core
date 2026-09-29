@@ -82,9 +82,11 @@ class DictDomain(Domain):
 
     def __eq__(self, other: Any) -> bool:
         """Returns True if both domains are identical."""
+        if self is other:
+            return True
         if other.__class__ != self.__class__:
             return False
-        return self.key_to_domain == other.key_to_domain
+        return self._key_to_domain == other._key_to_domain
 
     @property
     def key_to_domain(self) -> Dict[Any, Domain]:

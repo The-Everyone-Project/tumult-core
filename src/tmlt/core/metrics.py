@@ -89,6 +89,8 @@ class Metric(Formattable, ABC):
 
     def __eq__(self, other: Any) -> bool:
         """Return True if both metrics are equal."""
+        if self is other:
+            return True
         return repr(self) == repr(other)
 
     def __hash__(self) -> int:
@@ -1323,6 +1325,50 @@ class DictMetric(Metric):
             key: self[key] for key in sorted(self.key_to_metric, key=str)
         }
         return f"{self.__class__.__name__}(key_to_metric={sorted_key_to_metric})"
+
+    def __eq__(self, other: Any) -> bool:
+        """Return True if both metrics have the same keys and equal metrics.
+
+        Keys are matched by type as well as value (so ``1``, ``1.0`` and
+        ``True`` are different keys), and key order is ignored.
+        """
+        if self is other:
+            return True
+        if other.__class__ is not self.__class__:
+            return False
+        mine = self._key_to_metric
+        theirs = other._key_to_metric
+        if len(mine) != len(theirs):
+            return False
+        # Fast path: both dicts have the same keys in the same order, which is the
+        # common case when one metric was derived from the same mapping as the other.
+        for (key1, metric1), (key2, metric2) in zip(mine.items(), theirs.items()):
+            if key1 is not key2 and (
+                key1.__class__ is not key2.__class__ or key1 != key2
+            ):
+                break
+            if metric1 is not metric2 and metric1 != metric2:
+                return False
+        else:
+            return True
+        # Slow path: keys are in a different order (or differ).
+        if {(key.__class__, key) for key in mine} != {
+            (key.__class__, key) for key in theirs
+        }:
+            return False
+        return all(
+            metric is theirs[key] or metric == theirs[key]
+            for key, metric in mine.items()
+        )
+
+    def __hash__(self) -> int:
+        """Returns hash value."""
+        return hash(
+            (
+                self.__class__.__name__,
+                frozenset((key.__class__, key) for key in self._key_to_metric),
+            )
+        )
 
     def _format_children(self) -> str:
         """Render keyed metrics as labeled sibling children."""

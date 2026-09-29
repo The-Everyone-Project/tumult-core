@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Tumult Labs 2022-2025, and the Tumult Core Contributors 2025-present
 
+import copy
 import datetime
 import textwrap
 from typing import Any, Dict, Union
@@ -2189,6 +2190,167 @@ class TestDictMetric(TestCase):
         """Tests that the metric is equal to itself and not other metrics."""
         self.assertEqual(value1 == value2, expected)
 
+    @parameterized.expand(
+        [
+            (  # key order is ignored
+                DictMetric({"A": AbsoluteDifference(), "B": SymmetricDifference()}),
+                DictMetric({"B": SymmetricDifference(), "A": AbsoluteDifference()}),
+                True,
+            ),
+            (  # same keys in a different order, metrics swapped
+                DictMetric({"A": AbsoluteDifference(), "B": SymmetricDifference()}),
+                DictMetric({"B": AbsoluteDifference(), "A": SymmetricDifference()}),
+                False,
+            ),
+            (  # first key matches, second differs
+                DictMetric({"A": AbsoluteDifference(), "B": AbsoluteDifference()}),
+                DictMetric({"A": AbsoluteDifference(), "C": AbsoluteDifference()}),
+                False,
+            ),
+            (  # keys that print the same way are still different keys
+                DictMetric({1: AbsoluteDifference()}),
+                DictMetric({"1": AbsoluteDifference()}),
+                False,
+            ),
+            (  # keys that compare equal but have different types are different
+                DictMetric({1: AbsoluteDifference()}),
+                DictMetric({1.0: AbsoluteDifference()}),
+                False,
+            ),
+            (
+                DictMetric({1: AbsoluteDifference()}),
+                DictMetric({True: AbsoluteDifference()}),
+                False,
+            ),
+            (  # mixed key types, different insertion order
+                DictMetric({1: AbsoluteDifference(), "1": SymmetricDifference()}),
+                DictMetric({"1": SymmetricDifference(), 1: AbsoluteDifference()}),
+                True,
+            ),
+            (
+                DictMetric({1: AbsoluteDifference(), "1": SymmetricDifference()}),
+                DictMetric({1: SymmetricDifference(), "1": AbsoluteDifference()}),
+                False,
+            ),
+            (  # tuple keys
+                DictMetric({("a", 1): AbsoluteDifference()}),
+                DictMetric({("a", 1): AbsoluteDifference()}),
+                True,
+            ),
+            (  # nested, inner key order differs
+                DictMetric(
+                    {
+                        "outer": DictMetric(
+                            {"x": AbsoluteDifference(), "y": SymmetricDifference()}
+                        )
+                    }
+                ),
+                DictMetric(
+                    {
+                        "outer": DictMetric(
+                            {"y": SymmetricDifference(), "x": AbsoluteDifference()}
+                        )
+                    }
+                ),
+                True,
+            ),
+            (  # nested, inner metric differs
+                DictMetric(
+                    {
+                        "outer": DictMetric(
+                            {"x": AbsoluteDifference(), "y": SymmetricDifference()}
+                        )
+                    }
+                ),
+                DictMetric(
+                    {
+                        "outer": DictMetric(
+                            {"x": AbsoluteDifference(), "y": AbsoluteDifference()}
+                        )
+                    }
+                ),
+                False,
+            ),
+            (  # nested vs. flat
+                DictMetric({"outer": DictMetric({"x": AbsoluteDifference()})}),
+                DictMetric({"outer": AbsoluteDifference()}),
+                False,
+            ),
+            (  # IfGroupedBy ignores the order of its columns
+                DictMetric(
+                    {"A": IfGroupedBy(["x", "y"], SumOf(SymmetricDifference()))}
+                ),
+                DictMetric(
+                    {"A": IfGroupedBy(["y", "x"], SumOf(SymmetricDifference()))}
+                ),
+                True,
+            ),
+            (
+                DictMetric({"A": IfGroupedBy(["x"], SumOf(SymmetricDifference()))}),
+                DictMetric({"A": IfGroupedBy(["y"], SumOf(SymmetricDifference()))}),
+                False,
+            ),
+            (DictMetric({}), DictMetric({}), True),
+            (DictMetric({}), DictMetric({"A": AbsoluteDifference()}), False),
+            (  # not a DictMetric, even though it has the same repr
+                DictMetric({"A": AbsoluteDifference()}),
+                type(
+                    "LooksLikeDictMetric",
+                    (),
+                    {
+                        "__repr__": lambda self: (
+                            "DictMetric(key_to_metric={'A': AbsoluteDifference()})"
+                        )
+                    },
+                )(),
+                False,
+            ),
+        ]
+    )
+    def test_eq_structural(self, value1: DictMetric, value2: Any, expected: bool):
+        """Equality compares keys (including their types) and metrics structurally.
+
+        Equal metrics must also have equal hashes.
+        """
+        self.assertEqual(value1 == value2, expected)
+        self.assertEqual(value2 == value1, expected)
+        self.assertEqual(value1 != value2, not expected)
+        if expected:
+            self.assertEqual(hash(value1), hash(value2))
+
+    def test_eq_identity(self):
+        """A metric is equal to itself, without comparing its entries."""
+        metric = DictMetric({"A": AbsoluteDifference(), "B": SymmetricDifference()})
+        with (
+            patch.object(
+                AbsoluteDifference, "__eq__", side_effect=AssertionError("compared")
+            ),
+            patch.object(
+                DictMetric, "__repr__", side_effect=AssertionError("repr called")
+            ),
+        ):
+            assert metric == metric  # noqa: PLR0124
+
+    def test_eq_does_not_use_repr(self):
+        """Comparing two equal DictMetrics does not build their string reprs."""
+        metric1 = DictMetric({"A": AbsoluteDifference(), "B": SymmetricDifference()})
+        metric2 = DictMetric({"A": AbsoluteDifference(), "B": SymmetricDifference()})
+        with patch.object(
+            DictMetric, "__repr__", side_effect=AssertionError("repr called")
+        ):
+            assert metric1 == metric2
+            assert metric1 != DictMetric({"A": AbsoluteDifference()})
+
+    def test_hash(self):
+        """DictMetrics are hashable, including ones containing unhashable metrics."""
+        metric = DictMetric({"A": IfGroupedBy(["x"], SumOf(SymmetricDifference()))})
+        assert hash(metric) == hash(
+            DictMetric({"A": IfGroupedBy(["x"], SumOf(SymmetricDifference()))})
+        )
+        assert {metric: 1}[
+            DictMetric({"A": IfGroupedBy(["x"], SumOf(SymmetricDifference()))})
+        ] == 1
+
     def test_repr(self):
         """Tests that the string representation is as expected."""
         self.assertEqual(
@@ -2733,3 +2895,66 @@ class TestAddRemoveIDs(PySparkTest):
             for key, (data, schema) in value2.items()
         }
         self.assertEqual(metric.distance(value1, value2, domain), distance)
+
+
+_METRICS_FOR_EQ_CONSISTENCY = [
+    NullMetric(),
+    AbsoluteDifference(),
+    SymmetricDifference(),
+    HammingDistance(),
+    SumOf(AbsoluteDifference()),
+    SumOf(SymmetricDifference()),
+    RootSumOfSquared(AbsoluteDifference()),
+    OnColumn("A", SumOf(AbsoluteDifference())),
+    OnColumn("B", SumOf(AbsoluteDifference())),
+    OnColumns(
+        [
+            OnColumn("A", SumOf(AbsoluteDifference())),
+            OnColumn("B", RootSumOfSquared(AbsoluteDifference())),
+        ]
+    ),
+    IfGroupedBy(["A"], SumOf(SymmetricDifference())),
+    IfGroupedBy(["A"], RootSumOfSquared(SymmetricDifference())),
+    IfGroupedBy(["B"], SymmetricDifference()),
+    AddRemoveIDs({"t": "id"}),
+    AddRemoveIDs({"t": "id2"}),
+    DictMetric({}),
+    DictMetric({"x": AbsoluteDifference()}),
+    DictMetric({"x": SymmetricDifference()}),
+    DictMetric({"y": AbsoluteDifference()}),
+]
+
+
+@pytest.mark.parametrize(
+    "inner1,inner2",
+    [(a, b) for a in _METRICS_FOR_EQ_CONSISTENCY for b in _METRICS_FOR_EQ_CONSISTENCY],
+)
+def test_dict_metric_eq_matches_repr_eq(inner1: Metric, inner2: Metric):
+    """DictMetric equality agrees with comparing reprs for well-behaved keys.
+
+    Also checks that hashes are consistent with equality.
+    """
+    candidates = [
+        (
+            DictMetric({"k": inner1, 2: inner1}),
+            DictMetric({"k": inner2, 2: inner2}),
+        ),
+        (
+            DictMetric({"k": inner1, 2: AbsoluteDifference()}),
+            DictMetric({2: AbsoluteDifference(), "k": inner2}),
+        ),
+        (
+            DictMetric({"outer": DictMetric({"k": inner1}), "other": inner1}),
+            DictMetric({"other": inner2, "outer": DictMetric({"k": inner2})}),
+        ),
+        (
+            DictMetric({"k": inner1}),
+            DictMetric({"k": copy.deepcopy(inner2)}),
+        ),
+    ]
+    for metric1, metric2 in candidates:
+        expected = repr(metric1) == repr(metric2)
+        assert (metric1 == metric2) == expected
+        assert (metric2 == metric1) == expected
+        if expected:
+            assert hash(metric1) == hash(metric2)

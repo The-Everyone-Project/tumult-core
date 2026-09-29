@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from itertools import combinations_with_replacement
 from test.unit.domains.abstract import DomainTests
 from typing import Any, Callable, ContextManager, Dict, Optional, Type
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -396,6 +397,38 @@ class TestDictDomain(DomainTests):
             expected: The expected result of the comparison.
         """
         super().test_eq(domain, other_domain, expected)
+
+    def test_eq_identity(self, domain: DictDomain):
+        """A domain is equal to itself, without comparing its entries."""
+        with patch.object(
+            NumpyIntegerDomain, "__eq__", side_effect=AssertionError("compared")
+        ):
+            assert domain == domain  # noqa: PLR0124
+
+    @pytest.mark.parametrize(
+        "domain1, domain2, expected",
+        [
+            (
+                DictDomain({"a": DictDomain({"x": NumpyIntegerDomain()})}),
+                DictDomain({"a": DictDomain({"x": NumpyIntegerDomain()})}),
+                True,
+            ),
+            (
+                DictDomain({"a": DictDomain({"x": NumpyIntegerDomain()})}),
+                DictDomain({"a": DictDomain({"x": NumpyFloatDomain()})}),
+                False,
+            ),
+            (
+                DictDomain({1: NumpyIntegerDomain()}),
+                DictDomain({"1": NumpyIntegerDomain()}),
+                False,
+            ),
+        ],
+    )
+    def test_eq_nested(self, domain1: DictDomain, domain2: Any, expected: bool):
+        """__eq__ works for nested domains and non-string keys."""
+        assert (domain1 == domain2) == expected
+        assert (domain2 == domain1) == expected
 
     @pytest.mark.parametrize(
         "domain_args, key, mutator",

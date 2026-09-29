@@ -431,9 +431,15 @@ class SparkDataFrameDomain(Domain):
 
     def __eq__(self, other: Any) -> bool:
         """Return True if the classes are equivalent."""
+        if self is other:
+            return True
         if self.__class__ != other.__class__:
             return False
-        return OrderedDict(self.schema) == OrderedDict(other.schema)
+        # Same as comparing OrderedDicts of the schemas (column order matters), but
+        # without copying them.
+        return self._schema == other._schema and list(self._schema) == list(
+            other._schema
+        )
 
     @property
     def carrier_type(self) -> type:

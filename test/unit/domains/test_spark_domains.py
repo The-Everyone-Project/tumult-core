@@ -9,6 +9,7 @@ from contextlib import nullcontext as does_not_raise
 from itertools import combinations_with_replacement, product
 from test.unit.domains.abstract import DomainTests
 from typing import Any, Callable, ContextManager, Dict, List, Optional, Type
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
@@ -56,6 +57,17 @@ from tmlt.core.domains.spark_domains import (
 from tmlt.core.utils.grouped_dataframe import GroupedDataFrame
 from tmlt.core.utils.misc import get_fullname
 from tmlt.core.utils.testing import assert_dataframe_equal, get_all_props
+
+
+_EQ_SCHEMAS: List[SparkColumnsDescriptor] = [
+    {},
+    {"A": SparkStringColumnDescriptor()},
+    {"A": SparkStringColumnDescriptor(), "B": SparkFloatColumnDescriptor()},
+    {"B": SparkFloatColumnDescriptor(), "A": SparkStringColumnDescriptor()},
+    {"A": SparkStringColumnDescriptor(), "B": SparkStringColumnDescriptor()},
+    {"A": SparkStringColumnDescriptor(allow_null=True)},
+]
+"""Schemas used to check SparkDataFrameDomain equality."""
 
 
 @pytest.mark.usefixtures("class_spark")
@@ -203,6 +215,27 @@ class TestSparkDataFrameDomain(DomainTests):
             expected: The expected result of the comparison.
         """
         super().test_eq(domain, other_domain, expected)
+
+    def test_eq_identity(self, domain: SparkDataFrameDomain):
+        """A domain is equal to itself, without comparing its schema."""
+        with patch.object(
+            SparkStringColumnDescriptor,
+            "__eq__",
+            side_effect=AssertionError("compared"),
+        ):
+            assert domain == domain  # noqa: PLR0124
+
+    @pytest.mark.parametrize(
+        "schema1, schema2", list(product(_EQ_SCHEMAS, _EQ_SCHEMAS))
+    )
+    def test_eq_matches_ordered_schema_comparison(
+        self, schema1: SparkColumnsDescriptor, schema2: SparkColumnsDescriptor
+    ):
+        """__eq__ is equivalent to comparing the schemas as ordered mappings."""
+        expected = list(schema1.items()) == list(schema2.items())
+        assert (SparkDataFrameDomain(schema1) == SparkDataFrameDomain(schema2)) == (
+            expected
+        )
 
     @pytest.mark.parametrize(
         "domain_args, key, mutator",

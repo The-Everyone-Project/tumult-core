@@ -24,6 +24,7 @@ Changed
   - ``AddRemoveKeys`` -> :class:`~tmlt.core.metrics.AddRemoveIDs`
   - ``PrivateJoinOnKey`` -> :class:`~tmlt.core.transformations.spark_transformations.join.PrivateJoinOnIDs`
   - ``FlatMapByKey`` -> :class:`~tmlt.core.transformations.spark_transformations.map.FlatMapByID`
+- When the input metric is a :class:`~tmlt.core.metrics.DictMetric`, the stability functions of :class:`~tmlt.core.transformations.dictionary.GetValue` and :class:`~tmlt.core.transformations.dictionary.Subset` now only validate the distances for the keys they return, instead of every distance in ``d_in``. ``d_in`` must still be a dictionary with exactly the metric's keys. This makes them much faster for dictionaries with many keys. Invalid distances for other keys are no longer rejected by these transformations, but are still rejected by components that use the whole dictionary, such as :meth:`DictMetric.validate() <tmlt.core.metrics.DictMetric.validate>`, :meth:`DictMetric.compare() <tmlt.core.metrics.DictMetric.compare>`, and the privacy and stability relations of :class:`~tmlt.core.measurements.chaining.ChainTM` and :class:`~tmlt.core.transformations.chaining.ChainTT`. Added :meth:`DictMetric.validate_subset() <tmlt.core.metrics.DictMetric.validate_subset>`.
 
 Fixed
 ~~~~~

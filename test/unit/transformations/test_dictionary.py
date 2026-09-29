@@ -23,6 +23,10 @@ from tmlt.core.domains.spark_domains import (
     SparkStringColumnDescriptor,
 )
 from tmlt.core.exceptions import DomainKeyError, UnsupportedDomainError
+from tmlt.core.measurements.chaining import ChainTM
+from tmlt.core.measurements.interactive_measurements import SequentialComposition
+from tmlt.core.measurements.noise_mechanisms import AddLaplaceNoise
+from tmlt.core.measures import PureDP
 from tmlt.core.metrics import (
     AbsoluteDifference,
     AddRemoveIDs,
@@ -42,12 +46,27 @@ from tmlt.core.transformations.dictionary import (
     create_transform_all_values,
     create_transform_value,
 )
+from tmlt.core.transformations.identity import Identity
 from tmlt.core.utils.exact_number import ExactNumberInput
 from tmlt.core.utils.testing import (
     assert_property_immutability,
     create_mock_transformation,
     get_all_props,
 )
+
+_NUMPY_DICT_DOMAIN = DictDomain(
+    {"A": NumpyIntegerDomain(), "B": NumpyIntegerDomain(), "C": NumpyIntegerDomain()}
+)
+_NUMPY_DICT_METRIC = DictMetric(
+    {"A": AbsoluteDifference(), "B": AbsoluteDifference(), "C": AbsoluteDifference()}
+)
+_BAD_STRUCTURE_D_INS: List[Any] = [
+    {"A": 1, "B": 2},  # missing key
+    {"A": 1, "C": 3},  # missing key
+    {"A": 1, "B": 2, "C": 3, "D": 4},  # extra key
+    {"B": 2, "C": 3, "D": 4},  # accessed key missing
+    (1, 2, 3),  # not a dict
+]
 
 
 class TestAugmentDictTransformation(TestCase):
@@ -400,6 +419,38 @@ class TestGetValue(TestCase):
         self.assertEqual(transformation.stability_function(d_in=d_in), d_out)
         self.assertTrue(transformation.stability_relation(d_in=d_in, d_out=d_out))
 
+    def test_stability_function_validates_only_accessed_key(self):
+        """GetValue validates the key set of d_in, but only the accessed value.
+
+        This is an intentional behavior change: invalid distances for keys other
+        than :attr:`~.GetValue.key` are no longer rejected by GetValue, because they
+        cannot affect its output d_out.
+        """
+        transformation = GetValue(
+            input_domain=_NUMPY_DICT_DOMAIN, input_metric=_NUMPY_DICT_METRIC, key="A"
+        )
+        self.assertEqual(transformation.stability_function({"A": 1, "B": 2, "C": 3}), 1)
+        # Invalid sibling distances are ignored.
+        self.assertEqual(
+            transformation.stability_function({"A": 1, "B": -1, "C": "x"}), 1
+        )
+        self.assertTrue(
+            transformation.stability_relation({"A": 1, "B": -1, "C": "x"}, 1)
+        )
+        self.assertFalse(
+            transformation.stability_relation({"A": 2, "B": -1, "C": "x"}, 1)
+        )
+        # An invalid distance for the accessed key is still rejected.
+        for bad_value in (-1, "x", 1.5):
+            with self.assertRaisesRegex(ValueError, "Invalid value for DictMetric"):
+                transformation.stability_function({"A": bad_value, "B": 2, "C": 3})
+            with self.assertRaisesRegex(ValueError, "Invalid value for DictMetric"):
+                transformation.stability_relation({"A": bad_value, "B": 2, "C": 3}, 1)
+        # An invalid d_in structure is still rejected.
+        for bad_d_in in _BAD_STRUCTURE_D_INS:
+            with self.assertRaisesRegex(ValueError, "DictMetric value"):
+                transformation.stability_function(bad_d_in)
+
 
 class TestSubset(TestCase):
     """Tests for :class:`~tmlt.core.transformations.dictionary.Subset`."""
@@ -592,6 +643,114 @@ class TestSubset(TestCase):
             input_domain=self.input_domain, input_metric=input_metric, keys=["key1"]
         )
         self.assertEqual(transformation.stability_function(d_in), d_out)
+
+    def test_stability_function_validates_only_selected_keys(self):
+        """Subset validates the key set of d_in, but only the selected values.
+
+        This is an intentional behavior change: invalid distances for keys that are
+        not in :attr:`~.Subset.keys` are no longer rejected by Subset, because they
+        cannot affect its output d_out.
+        """
+        transformation = Subset(
+            input_domain=_NUMPY_DICT_DOMAIN,
+            input_metric=_NUMPY_DICT_METRIC,
+            keys=["A", "B"],
+        )
+        self.assertEqual(
+            transformation.stability_function({"A": 1, "B": 2, "C": 3}),
+            {"A": 1, "B": 2},
+        )
+        # Invalid distances for keys that are not selected are ignored, and are
+        # not part of the output.
+        self.assertEqual(
+            transformation.stability_function({"A": 1, "B": 2, "C": -1}),
+            {"A": 1, "B": 2},
+        )
+        self.assertTrue(
+            transformation.stability_relation(
+                {"A": 1, "B": 2, "C": -1}, {"A": 1, "B": 2}
+            )
+        )
+        # An invalid distance for any selected key is still rejected.
+        for bad_d_in in (
+            {"A": -1, "B": 2, "C": 3},
+            {"A": 1, "B": -1, "C": 3},
+            {"A": 1, "B": "x", "C": 3},
+        ):
+            with self.assertRaisesRegex(ValueError, "Invalid value for DictMetric"):
+                transformation.stability_function(bad_d_in)
+        # An invalid d_in structure is still rejected.
+        for bad_d_in in _BAD_STRUCTURE_D_INS:
+            with self.assertRaisesRegex(ValueError, "DictMetric value"):
+                transformation.stability_function(bad_d_in)
+
+
+class TestPartialDictValidationInContext(TestCase):
+    """Invalid sibling distances ignored by GetValue are rejected elsewhere.
+
+    :class:`~.GetValue` and :class:`~.Subset` only validate the distances they
+    return. These tests check that the components which use the whole distance
+    dictionary still validate all of it.
+    """
+
+    def setUp(self):
+        """Setup."""
+        self.get_value = GetValue(
+            input_domain=_NUMPY_DICT_DOMAIN, input_metric=_NUMPY_DICT_METRIC, key="A"
+        )
+        self.measurement = ChainTM(
+            self.get_value, AddLaplaceNoise(input_domain=NumpyIntegerDomain(), scale=1)
+        )
+        self.invalid_sibling = {"A": 1, "B": -1, "C": 3}
+
+    def test_chain_privacy_relation_validates_whole_dict(self):
+        """ChainTM's privacy relation validates every distance in d_in."""
+        self.assertTrue(self.measurement.privacy_relation({"A": 1, "B": 2, "C": 3}, 1))
+        with self.assertRaisesRegex(ValueError, "Invalid value for DictMetric"):
+            self.measurement.privacy_relation(self.invalid_sibling, 1)
+
+    def test_chain_privacy_function_uses_only_accessed_key(self):
+        """ChainTM's privacy function only depends on the accessed distance."""
+        self.assertEqual(self.measurement.privacy_function(self.invalid_sibling), 1)
+        with self.assertRaisesRegex(ValueError, "Invalid value for DictMetric"):
+            self.measurement.privacy_function({"A": -1, "B": 2, "C": 3})
+
+    def test_dict_metric_validate_and_compare_reject_invalid_sibling(self):
+        """DictMetric.validate and DictMetric.compare validate every distance."""
+        with self.assertRaisesRegex(ValueError, "Invalid value for DictMetric"):
+            _NUMPY_DICT_METRIC.validate(self.invalid_sibling)
+        with self.assertRaisesRegex(ValueError, "Invalid value for DictMetric"):
+            _NUMPY_DICT_METRIC.compare(self.invalid_sibling, {"A": 1, "B": 2, "C": 3})
+
+    def test_augment_dict_rejects_invalid_sibling(self):
+        """Transformations that return the whole dictionary validate all of it."""
+        copy_and_transform = create_copy_and_transform_value(
+            input_domain=_NUMPY_DICT_DOMAIN,
+            input_metric=_NUMPY_DICT_METRIC,
+            key="A",
+            new_key="D",
+            transformation=Identity(
+                metric=AbsoluteDifference(), domain=NumpyIntegerDomain()
+            ),
+            hint=lambda d_in, _: d_in,
+        )
+        self.assertEqual(
+            copy_and_transform.stability_function({"A": 1, "B": 2, "C": 3}),
+            {"A": 1, "B": 2, "C": 3, "D": 1},
+        )
+        with self.assertRaisesRegex(ValueError, "Invalid value for DictMetric"):
+            copy_and_transform.stability_function(self.invalid_sibling)
+
+    def test_interactive_measurement_rejects_invalid_sibling(self):
+        """The d_in of an interactive measurement is validated in full."""
+        with self.assertRaisesRegex(ValueError, "Invalid value for DictMetric"):
+            SequentialComposition(
+                input_domain=_NUMPY_DICT_DOMAIN,
+                input_metric=_NUMPY_DICT_METRIC,
+                output_measure=PureDP(),
+                d_in=self.invalid_sibling,
+                privacy_budget=1,
+            )
 
 
 class TestCreateDictFromValue(TestCase):

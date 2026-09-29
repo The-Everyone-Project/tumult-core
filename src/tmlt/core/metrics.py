@@ -1259,6 +1259,40 @@ class DictMetric(Metric):
             except ValueError as e:
                 raise ValueError(f"Invalid value for DictMetric: {e}") from e
 
+    def validate_subset(self, value: Dict[Any, Any], keys: Iterable[Any]) -> None:
+        """Raises an error if ``value`` is not a valid distance at ``keys``.
+
+        This is a cheaper version of :meth:`validate` for callers that only use the
+        distances at ``keys`` (for example, :class:`~.GetValue` and
+        :class:`~.Subset`). It checks that:
+
+        * ``value`` is a dictionary with the same keys as :attr:`~.key_to_metric`
+        * for each key in ``keys``, ``value[key]`` is a valid distance under the
+          corresponding metric
+
+        The distances at all other keys are **not** validated. Callers must therefore
+        only use this if the result they compute depends on ``value`` only through
+        the distances at ``keys``; use :meth:`validate` otherwise. Subclasses that
+        override :meth:`validate` must also override this method.
+
+        Args:
+            value: A distance between two datasets under this metric.
+            keys: The keys whose distances must be validated. Each must be a key of
+                :attr:`~.key_to_metric`.
+        """
+        if not isinstance(value, dict):
+            raise ValueError("DictMetric value must be a python dictionary.")
+        if set(self._key_to_metric) != set(value):
+            raise ValueError(
+                f"Invalid DictMetric value: Expected keys: {set(self._key_to_metric)}"
+                f" not: {set(value)}"
+            )
+        for key in keys:
+            try:
+                self._key_to_metric[key].validate(value[key])
+            except ValueError as e:
+                raise ValueError(f"Invalid value for DictMetric: {e}") from e
+
     def compare(self, value1: Dict[Any, Any], value2: Dict[Any, Any]) -> bool:
         """Returns True if ``value1`` is less than or equal to ``value2``.
 

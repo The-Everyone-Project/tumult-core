@@ -3,9 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Tumult Labs 2022-2025, and the Tumult Core Contributors 2025-present
 
+from tmlt.core.domains.collections import DictDomain
 from tmlt.core.domains.numpy_domains import NumpyIntegerDomain
 from tmlt.core.domains.spark_domains import SparkDataFrameDomain
-from tmlt.core.metrics import AbsoluteDifference, SymmetricDifference
+from tmlt.core.metrics import AbsoluteDifference, DictMetric, SymmetricDifference
 from tmlt.core.transformations.identity import Identity
 from tmlt.core.utils.testing import TestComponent, assert_dataframe_equal
 
@@ -44,6 +45,24 @@ class TestIdentityTransformation(TestComponent):
         self.assertTrue(id_transformation.stability_relation(1, 1))
         self.assertTrue(id_transformation.stability_relation(1, 2))
         self.assertFalse(id_transformation.stability_relation(4, 2))
+
+    def test_dict_metric_validates_every_value(self):
+        """Identity validates every distance of a DictMetric d_in.
+
+        Unlike GetValue and Subset, Identity returns the whole d_in, so all of its
+        distances are validated.
+        """
+        transformation = Identity(
+            DictMetric({"A": AbsoluteDifference(), "B": AbsoluteDifference()}),
+            DictDomain({"A": NumpyIntegerDomain(), "B": NumpyIntegerDomain()}),
+        )
+        self.assertEqual(
+            transformation.stability_function({"A": 1, "B": 2}), {"A": 1, "B": 2}
+        )
+        with self.assertRaisesRegex(ValueError, "Invalid value for DictMetric"):
+            transformation.stability_function({"A": 1, "B": -1})
+        with self.assertRaisesRegex(ValueError, "Invalid DictMetric value"):
+            transformation.stability_function({"A": 1})
 
     def test_format(self):
         """Identity formats as just its class name."""

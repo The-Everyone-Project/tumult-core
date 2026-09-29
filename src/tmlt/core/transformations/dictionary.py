@@ -291,12 +291,26 @@ class Subset(Transformation):
 
         The returned d_out is {key: d_in[key] for key in self.keys}.
 
+        If the input metric is a :class:`~.DictMetric`, only the distances for
+        :attr:`~.keys` are validated (``d_in`` must still be a dictionary with exactly
+        the input metric's keys); the distances for the other keys are ignored.
+
         Args:
             d_in: Distance between inputs under input_metric.
         """
-        self.input_metric.validate(d_in)
         if isinstance(self.input_metric, DictMetric):
-            return {key: d_in[key] for key in self.keys}
+            # Only the distances at self._keys are validated. This is sound because
+            # d_out is built from those distances alone: for any pair of inputs x, x'
+            # whose distance under the input metric is at most d_in, the distance
+            # between x[k] and x'[k] is at most d_in[k] for each k in self._keys,
+            # regardless of what d_in holds for the other keys. The other distances
+            # are dropped here and never reach d_out, so an invalid value there
+            # cannot make the returned d_out smaller than the true stability. Full
+            # validation of d_in would cost O(len(d_in)) metric validations per
+            # call.
+            self.input_metric.validate_subset(d_in, self._keys)
+            return {key: d_in[key] for key in self._keys}
+        self.input_metric.validate(d_in)
         return d_in
 
     def __call__(self, input_dict: Any) -> Any:
@@ -362,14 +376,26 @@ class GetValue(Transformation):
 
         The returned d_out is d_in[self.key].
 
+        If the input metric is a :class:`~.DictMetric`, only the distance for
+        :attr:`~.key` is validated (``d_in`` must still be a dictionary with exactly
+        the input metric's keys); the distances for the other keys are ignored.
+
         Args:
             d_in: Distance between inputs under input_metric.
         """
-        self.input_metric.validate(d_in)
         if isinstance(self.input_metric, DictMetric):
-            return d_in[self.key]
-        else:
-            return d_in
+            # Only d_in[self.key] is validated. This is sound because d_out is
+            # d_in[self.key] itself: for any pair of inputs x, x' whose distance
+            # under the input metric is at most d_in, the distance between
+            # x[self.key] and x'[self.key] is at most d_in[self.key], regardless of
+            # what d_in holds for the other keys. The other distances are dropped
+            # here and never reach d_out, so an invalid value there cannot make the
+            # returned d_out smaller than the true stability. Full validation of
+            # d_in would cost O(len(d_in)) metric validations per call.
+            self.input_metric.validate_subset(d_in, (self._key,))
+            return d_in[self._key]
+        self.input_metric.validate(d_in)
+        return d_in
 
     def __call__(self, input_dict: Any) -> Any:
         """Returns value for specified key."""

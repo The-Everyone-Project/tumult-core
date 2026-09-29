@@ -2125,6 +2125,43 @@ class TestDictMetric(TestCase):
                 (3, 2)  # type: ignore
             )
 
+    def test_validate_subset(self):
+        """validate_subset checks the key set and only the given keys' values."""
+        metric = DictMetric(
+            {
+                "A": SymmetricDifference(),
+                "B": SymmetricDifference(),
+                "C": AbsoluteDifference(),
+            }
+        )
+        metric.validate_subset({"A": 1, "B": 2, "C": 3}, ["A"])
+        metric.validate_subset({"A": 1, "B": 2, "C": 3}, ["A", "B"])
+        metric.validate_subset({"A": 1, "B": 2, "C": 3}, [])
+        # Invalid values at keys that are not checked are accepted...
+        metric.validate_subset({"A": 1, "B": -1, "C": "not a distance"}, ["A"])
+        # ...but still rejected by the full validate.
+        with self.assertRaisesRegex(ValueError, "Invalid value for DictMetric"):
+            metric.validate({"A": 1, "B": -1, "C": 3})
+        # Invalid values at checked keys are rejected with the same error as validate.
+        for keys in (["B"], ["A", "B"]):
+            with self.assertRaisesRegex(
+                ValueError, "Invalid value for DictMetric: .*greater than or equal"
+            ):
+                metric.validate_subset({"A": 1, "B": -1, "C": 3}, keys)
+        with self.assertRaisesRegex(ValueError, "Invalid value for DictMetric"):
+            metric.validate_subset({"A": "x", "B": 1, "C": 3}, ["A"])
+        # The key set is always checked, even if keys is empty.
+        for bad_keys in ({"A": 1, "B": 2}, {"A": 1, "B": 2, "C": 3, "D": 4}):
+            for keys in (["A"], []):
+                with self.assertRaisesRegex(
+                    ValueError, "Invalid DictMetric value: Expected keys"
+                ):
+                    metric.validate_subset(bad_keys, keys)
+        with self.assertRaisesRegex(
+            ValueError, "DictMetric value must be a python dictionary"
+        ):
+            metric.validate_subset((1, 2, 3), ["A"])  # type: ignore
+
     @parameterized.expand(
         [
             (True, True, True),

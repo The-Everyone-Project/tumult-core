@@ -6,7 +6,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, List, Optional, Union, cast
+from typing import Any, Callable, List, Optional, Tuple, Union, cast
 from warnings import warn
 
 from typeguard import check_type, typechecked
@@ -770,6 +770,91 @@ class MakeInteractive(Measurement):
         return GetAnswerQueryable(self._measurement, data)
 
 
+def _is_same_distance(value1: Any, value2: Any) -> bool:
+    """Returns True if two distances are the same object or identical values.
+
+    Stricter than ``==``: values must also have the same type, recursively through
+    dicts, tuples and lists, so that e.g. ``1`` and ``1.0``, or an int and an
+    :class:`~.ExactNumber` with the same value, are not considered the same. A False
+    result is always safe for the caller (it only causes a recomputation).
+    """
+    if value1 is value2:
+        return True
+    if type(value1) is not type(value2):  # pylint: disable=unidiomatic-typecheck
+        return False
+    if isinstance(value1, dict):
+        return value1.keys() == value2.keys() and all(
+            _is_same_distance(item, value2[key]) for key, item in value1.items()
+        )
+    if isinstance(value1, (tuple, list)):
+        return len(value1) == len(value2) and all(
+            _is_same_distance(item1, item2) for item1, item2 in zip(value1, value2)
+        )
+    return bool(value1 == value2)
+
+
+def _snapshot_distance(value: Any) -> Any:
+    """Returns a copy of the dicts, lists and tuples making up a distance.
+
+    The numbers at the leaves (ints, ExactNumbers, sympy expressions and so on)
+    are immutable and are not copied.
+    """
+    if isinstance(value, dict):
+        return {key: _snapshot_distance(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_snapshot_distance(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_snapshot_distance(item) for item in value)
+    return value
+
+
+class _RelationCachingMakeInteractive(MakeInteractive):
+    """A :class:`~.MakeInteractive` that remembers the privacy relation it verified.
+
+    Only for internal use by :meth:`PrivacyAccountant.measure`, which checks the
+    privacy relation of the measurement itself (to report errors in its own terms
+    before spending any budget) and then submits this measurement to its
+    :class:`~.SequentialQueryable`, which checks the privacy relation again for its
+    own ``d_in`` and the same ``d_out``. Both calls go through this object, so the
+    second one can reuse the result of the first when its arguments are the same.
+
+    :meth:`privacy_relation` returns exactly what the wrapped measurement's
+    :meth:`~.Measurement.privacy_relation` returns: it only skips re-evaluating it
+    when called again with the same ``d_in`` and ``d_out`` (see
+    :func:`_is_same_distance`) as a previous call that returned a truthy result.
+    Any other call, including one with a different ``d_in``, evaluates the wrapped
+    measurement's privacy relation as usual. This relies on privacy relations being
+    deterministic functions of their arguments, which callers of the relation
+    already assume.
+    """
+
+    def __init__(self, measurement: Measurement):
+        """Constructor.
+
+        Args:
+            measurement: Non-interactive measurement to be wrapped.
+        """
+        super().__init__(measurement)
+        self._verified: Optional[Tuple[Any, Any, Any]] = None
+
+    def privacy_relation(self, d_in: Any, d_out: Any) -> Any:
+        """Returns True only if wrapped measurement's privacy relation is satisfied."""
+        if self._verified is not None:
+            verified_d_in, verified_d_out, verified_result = self._verified
+            if _is_same_distance(verified_d_in, d_in) and _is_same_distance(
+                verified_d_out, d_out
+            ):
+                return verified_result
+        # Snapshot the arguments before evaluating, so that what is remembered is
+        # exactly what the relation was evaluated on, even if a caller later mutates
+        # the objects it passed.
+        arguments = (_snapshot_distance(d_in), _snapshot_distance(d_out))
+        result = super().privacy_relation(d_in, d_out)
+        if result:
+            self._verified = (*arguments, result)
+        return result
+
+
 class PrivacyAccountantState(Enum):
     # disable=line-too-long
     """All possible states for a :class:`~.PrivacyAccountant`."""
@@ -1313,8 +1398,12 @@ class PrivacyAccountant:
                 ),
             )
 
+        # The queryable checks the privacy relation of this same object again, for
+        # its own d_in and this d_out, before answering; this object lets that check
+        # reuse the result of the one below when the arguments are the same.
+        interactive_measurement = _RelationCachingMakeInteractive(measurement)
         if d_out:
-            if not measurement.privacy_relation(self.d_in, d_out):
+            if not interactive_measurement.privacy_relation(self.d_in, d_out):
                 raise ValueError(
                     f"Given d_out ({d_out}) does not satisfy the privacy relation w.r.t"
                     f" this PrivacyAccountant's d_in ({self.d_in})."
@@ -1327,7 +1416,7 @@ class PrivacyAccountant:
         if self._privacy_budget.is_finite():
             self._privacy_budget = self._privacy_budget.subtract(d_out)
         return self._queryable(
-            MeasurementQuery(measurement=MakeInteractive(measurement), d_out=d_out)
+            MeasurementQuery(measurement=interactive_measurement, d_out=d_out)
         )(None)
 
     def split(

@@ -25,8 +25,14 @@ from tmlt.core.domains.spark_domains import (
     SparkIntegerColumnDescriptor,
     SparkStringColumnDescriptor,
 )
-from tmlt.core.exceptions import OutOfDomainError, UnsupportedDomainError
+from tmlt.core.exceptions import (
+    DomainMismatchError,
+    MetricMismatchError,
+    OutOfDomainError,
+    UnsupportedDomainError,
+)
 from tmlt.core.measurements.base import Measurement
+from tmlt.core.measurements.chaining import ChainTM
 from tmlt.core.measurements.interactive_measurements import (
     DecoratedQueryable,
     DecorateQueryable,
@@ -44,12 +50,15 @@ from tmlt.core.measurements.interactive_measurements import (
     SequentialComposition,
     SequentialQueryable,
     TransformationQuery,
+    _is_same_distance,
+    _RelationCachingMakeInteractive,
     create_adaptive_composition,
 )
 from tmlt.core.measurements.noise_mechanisms import AddLaplaceNoise
 from tmlt.core.measures import (
     ApproxDP,
     ApproxDPBudget,
+    InsufficientBudgetError,
     Measure,
     PureDP,
     PureDPBudget,
@@ -66,6 +75,7 @@ from tmlt.core.metrics import (
     SymmetricDifference,
 )
 from tmlt.core.transformations.base import Transformation
+from tmlt.core.transformations.dictionary import GetValue
 from tmlt.core.utils.exact_number import ExactNumber, ExactNumberInput
 from tmlt.core.utils.testing import (
     PySparkTest,
@@ -2266,3 +2276,319 @@ class TestCreateAdaptiveComposition(TestCase):
         )
         with self.assertRaisesRegex(ValueError, error_message):
             self.queryable(query2)
+
+
+class TestMeasurePrivacyRelationEvaluations(TestCase):
+    """PrivacyAccountant.measure evaluates the privacy relation once, checks intact.
+
+    The accountant checks the privacy relation itself and its SequentialQueryable
+    checks it again; the second check reuses the first when its arguments are the
+    same. These tests pin both the number of evaluations and that every check still
+    rejects what it rejected before.
+    """
+
+    def setUp(self):
+        """Test Setup."""
+        self.keys = ["A", "B", "C"]
+        self.domain = DictDomain({key: NumpyIntegerDomain() for key in self.keys})
+        self.metric = DictMetric({key: AbsoluteDifference() for key in self.keys})
+        self.data = {key: np.int64(i) for i, key in enumerate(self.keys)}
+
+    def launch(self, d_in: int = 1, privacy_budget: Any = 10) -> PrivacyAccountant:
+        """Returns an accountant over the dictionary of all keys."""
+        return PrivacyAccountant.launch(
+            SequentialComposition(
+                input_domain=self.domain,
+                input_metric=self.metric,
+                output_measure=PureDP(),
+                d_in={key: d_in for key in self.keys},
+                privacy_budget=privacy_budget,
+            ),
+            self.data,
+        )
+
+    def chain(self, scale: ExactNumberInput = 1) -> ChainTM:
+        """Returns a Laplace measurement on key "A" (epsilon = d_in / scale)."""
+        return ChainTM(
+            GetValue(self.domain, self.metric, "A"),
+            AddLaplaceNoise(NumpyIntegerDomain(), scale=scale),
+        )
+
+    @staticmethod
+    def queryable_budget(accountant: PrivacyAccountant) -> Any:
+        """Returns the budget remaining in the accountant's SequentialQueryable."""
+        return accountant._queryable._remaining_budget.value  # type: ignore # noqa: SLF001
+
+    def assert_budgets(self, accountant: PrivacyAccountant, expected: Any):
+        """Accountant and queryable both have exactly ``expected`` budget left."""
+        self.assertEqual(accountant.privacy_budget, expected)
+        self.assertEqual(self.queryable_budget(accountant), expected)
+
+    def count_evaluations(self):
+        """Patches ChainTM's privacy relation and function to count their calls."""
+        return (
+            patch.object(
+                ChainTM,
+                "privacy_relation",
+                autospec=True,
+                side_effect=ChainTM.privacy_relation,
+            ),
+            patch.object(
+                ChainTM,
+                "privacy_function",
+                autospec=True,
+                side_effect=ChainTM.privacy_function,
+            ),
+        )
+
+    def test_privacy_relation_evaluated_once_with_d_out(self):
+        """With a d_out, measure() evaluates the privacy relation exactly once."""
+        accountant = self.launch()
+        relation_patch, function_patch = self.count_evaluations()
+        with relation_patch as relation, function_patch as function:
+            accountant.measure(self.chain(), d_out=1)
+        self.assertEqual(relation.call_count, 1)
+        self.assertEqual(function.call_count, 0)
+        self.assert_budgets(accountant, 9)
+
+    def test_privacy_function_path_unchanged(self):
+        """Without a d_out, measure() evaluates the function, then the relation.
+
+        The accountant computes d_out with the privacy function; the queryable then
+        checks that d_out against the privacy relation, which is not skipped.
+        """
+        accountant = self.launch()
+        relation_patch, function_patch = self.count_evaluations()
+        with relation_patch as relation, function_patch as function:
+            accountant.measure(self.chain())
+        self.assertEqual(function.call_count, 1)
+        self.assertEqual(relation.call_count, 1)
+        self.assert_budgets(accountant, 9)
+
+    def test_relation_failure_rejected(self):
+        """A d_out that does not satisfy the relation is rejected, spending nothing."""
+        accountant = self.launch()
+        with self.assertRaisesRegex(
+            ValueError,
+            re.escape(
+                "Given d_out (1) does not satisfy the privacy relation w.r.t this"
+                " PrivacyAccountant's d_in ({'A': 1, 'B': 1, 'C': 1})."
+            ),
+        ):
+            # epsilon = 1 / (1/2) = 2 > 1
+            accountant.measure(self.chain(scale=sp.Rational(1, 2)), d_out=1)
+        self.assert_budgets(accountant, 10)
+
+    def test_relation_failure_rejected_mock(self):
+        """A measurement whose relation is False is never run."""
+        accountant = self.launch()
+        measurement = create_mock_measurement(
+            input_domain=self.domain,
+            input_metric=self.metric,
+            privacy_relation_return_value=False,
+        )
+        with self.assertRaisesRegex(
+            ValueError, "does not satisfy the privacy relation"
+        ):
+            accountant.measure(measurement, d_out=1)
+        measurement.assert_not_called()
+        measurement.privacy_relation.assert_called_once_with(
+            {"A": 1, "B": 1, "C": 1}, 1
+        )
+        self.assert_budgets(accountant, 10)
+
+    @parameterized.expand([(True,), (False,)])
+    def test_over_budget_rejected(self, with_d_out: bool):
+        """A measurement costing more than the remaining budget is rejected."""
+        accountant = self.launch(privacy_budget=10)
+        accountant.measure(self.chain(), d_out=1 if with_d_out else None)
+        with self.assertRaisesRegex(
+            InsufficientBudgetError,
+            re.escape(
+                "The remaining privacy budget is (epsilon=9), which is insufficient"
+                " given the requested budget (epsilon=10)."
+            ),
+        ):
+            accountant.measure(
+                self.chain(scale=sp.Rational(1, 10)), d_out=10 if with_d_out else None
+            )
+        self.assert_budgets(accountant, 9)
+        # Spending exactly what is left is still allowed.
+        accountant.measure(
+            self.chain(scale=sp.Rational(1, 9)), d_out=9 if with_d_out else None
+        )
+        self.assert_budgets(accountant, 0)
+
+    def test_mismatched_input_domain_rejected(self):
+        """A measurement with another input domain is rejected before any relation."""
+        accountant = self.launch()
+        measurement = create_mock_measurement(
+            input_domain=DictDomain({"A": NumpyIntegerDomain()}),
+            input_metric=self.metric,
+        )
+        with self.assertRaisesRegex(
+            DomainMismatchError,
+            "Measurement's input domain does not match PrivacyAccountant's input",
+        ):
+            accountant.measure(measurement, d_out=1)
+        measurement.privacy_relation.assert_not_called()
+        measurement.assert_not_called()
+        self.assert_budgets(accountant, 10)
+
+    def test_mismatched_input_metric_rejected(self):
+        """A measurement with another input metric is rejected before any relation."""
+        accountant = self.launch()
+        measurement = create_mock_measurement(
+            input_domain=self.domain,
+            input_metric=DictMetric({key: HammingDistance() for key in self.keys}),
+        )
+        with self.assertRaisesRegex(
+            MetricMismatchError,
+            "Measurement's input metric does not match PrivacyAccountant's input",
+        ):
+            accountant.measure(measurement, d_out=1)
+        measurement.privacy_relation.assert_not_called()
+        measurement.assert_not_called()
+        self.assert_budgets(accountant, 10)
+
+    def test_budgets_stay_consistent(self):
+        """Accountant and queryable spend exactly the same budget on every query."""
+        accountant = self.launch(privacy_budget=10)
+        spent = ExactNumber(0)
+        for scale, d_out in [(1, 1), (2, None), (1, 3), (sp.Rational(1, 2), None)]:
+            accountant.measure(self.chain(scale=scale), d_out=d_out)
+            spent += d_out if d_out is not None else ExactNumber(1) / scale
+            self.assert_budgets(accountant, 10 - spent)
+
+    def test_queryable_checks_its_own_d_in(self):
+        """The queryable re-evaluates the relation when its d_in is not the same.
+
+        The reused result only applies to the exact d_in the accountant checked, so
+        if the queryable's d_in were different (here: larger), the relation is
+        evaluated again for it and the query is refused.
+        """
+        queryable = SequentialComposition(
+            input_domain=self.domain,
+            input_metric=self.metric,
+            output_measure=PureDP(),
+            d_in={key: 2 for key in self.keys},
+            privacy_budget=10,
+        )(self.data)
+        accountant = PrivacyAccountant(
+            queryable=queryable,
+            input_domain=self.domain,
+            input_metric=self.metric,
+            output_measure=PureDP(),
+            d_in={key: 1 for key in self.keys},
+            privacy_budget=10,
+        )
+        relation_patch, _ = self.count_evaluations()
+        with relation_patch as relation:
+            with self.assertRaisesRegex(
+                ValueError,
+                "Measurement's privacy relation cannot be satisfied with given d_out",
+            ):
+                accountant.measure(self.chain(), d_out=1)
+        self.assertEqual(relation.call_count, 2)
+        self.assertEqual(queryable._remaining_budget.value, 10)  # noqa: SLF001
+
+    def test_queryable_checks_external_queries(self):
+        """Queries sent straight to the queryable are still fully checked."""
+        accountant = self.launch()
+        for measurement in [
+            MakeInteractive(self.chain(scale=sp.Rational(1, 2))),
+            _RelationCachingMakeInteractive(self.chain(scale=sp.Rational(1, 2))),
+        ]:
+            with self.assertRaisesRegex(
+                ValueError,
+                "Measurement's privacy relation cannot be satisfied with given d_out",
+            ):
+                accountant._queryable(  # type: ignore # noqa: SLF001
+                    MeasurementQuery(measurement, d_out=1)
+                )
+        self.assert_budgets(accountant, 10)
+
+
+class TestRelationCachingMakeInteractive(TestCase):
+    """Tests for :class:`~._RelationCachingMakeInteractive`."""
+
+    def test_reuses_only_identical_arguments(self):
+        """The wrapped relation is re-evaluated unless the arguments are the same."""
+        inner = create_mock_measurement(privacy_relation_return_value=True)
+        measurement = _RelationCachingMakeInteractive(inner)
+        d_in = {"A": 1, "B": ExactNumber(2)}
+        self.assertTrue(measurement.privacy_relation(d_in, 3))
+        self.assertTrue(measurement.privacy_relation(dict(d_in), 3))
+        self.assertEqual(inner.privacy_relation.call_count, 1)
+        for other_d_in, other_d_out in [
+            ({"A": 2, "B": ExactNumber(2)}, 3),
+            ({"A": 1.0, "B": ExactNumber(2)}, 3),
+            ({"A": ExactNumber(1), "B": ExactNumber(2)}, 3),
+            ({"A": 1}, 3),
+            (d_in, 4),
+            (d_in, ExactNumber(3)),
+        ]:
+            calls = inner.privacy_relation.call_count
+            measurement.privacy_relation(other_d_in, other_d_out)
+            self.assertEqual(inner.privacy_relation.call_count, calls + 1)
+
+    def test_mutated_argument_is_not_reused(self):
+        """What is remembered is the value the relation was evaluated on."""
+        inner = create_mock_measurement(privacy_relation_return_value=True)
+        measurement = _RelationCachingMakeInteractive(inner)
+        d_in = {"A": 1, "B": 1}
+        d_out = [1]
+        measurement.privacy_relation(d_in, d_out)
+        d_in["A"] = 2
+        measurement.privacy_relation(d_in, d_out)
+        self.assertEqual(inner.privacy_relation.call_count, 2)
+        d_out[0] = 2
+        measurement.privacy_relation(d_in, d_out)
+        self.assertEqual(inner.privacy_relation.call_count, 3)
+        measurement.privacy_relation({"A": 2, "B": 1}, [2])
+        self.assertEqual(inner.privacy_relation.call_count, 3)
+
+    def test_false_is_not_reused(self):
+        """A relation that does not hold is evaluated again every time."""
+        inner = create_mock_measurement(privacy_relation_return_value=False)
+        measurement = _RelationCachingMakeInteractive(inner)
+        self.assertFalse(measurement.privacy_relation(1, 1))
+        self.assertFalse(measurement.privacy_relation(1, 1))
+        self.assertEqual(inner.privacy_relation.call_count, 2)
+
+    def test_behaves_like_make_interactive(self):
+        """Apart from the privacy relation, it is a MakeInteractive."""
+        inner = create_mock_measurement(
+            privacy_function_implemented=True,
+            privacy_function_return_value=ExactNumber(5),
+            return_value=np.int64(7),
+        )
+        measurement = _RelationCachingMakeInteractive(inner)
+        self.assertTrue(measurement.is_interactive)
+        self.assertEqual(measurement.input_domain, inner.input_domain)
+        self.assertEqual(measurement.input_metric, inner.input_metric)
+        self.assertEqual(measurement.output_measure, inner.output_measure)
+        self.assertEqual(measurement.privacy_function(1), ExactNumber(5))
+        self.assertEqual(measurement(np.int64(0))(None), np.int64(7))
+
+    @parameterized.expand(
+        [
+            (1, 1, True),
+            (1, 1.0, False),
+            (1, ExactNumber(1), False),
+            (ExactNumber(1), ExactNumber(1), True),
+            ((1, sp.Rational(1, 2)), (1, sp.Rational(1, 2)), True),
+            ((1, 2), [1, 2], False),
+            ((1, 2), (1, 2, 3), False),
+            ({"A": 1, "B": 2}, {"B": 2, "A": 1}, True),
+            ({"A": 1, "B": 2}, {"A": 1}, False),
+            ({"A": 1}, {"A": 2}, False),
+            ({"A": {"B": (1, 2)}}, {"A": {"B": (1, 2)}}, True),
+            ({"A": {"B": (1, 2)}}, {"A": {"B": (1, 2.0)}}, False),
+            (float("nan"), float("nan"), False),
+        ]
+    )
+    def test_is_same_distance(self, value1: Any, value2: Any, expected: bool):
+        """_is_same_distance requires equal values of the same types."""
+        self.assertEqual(_is_same_distance(value1, value2), expected)
+        self.assertEqual(_is_same_distance(value2, value1), expected)

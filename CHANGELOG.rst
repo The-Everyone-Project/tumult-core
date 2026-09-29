@@ -24,6 +24,7 @@ Changed
   - ``AddRemoveKeys`` -> :class:`~tmlt.core.metrics.AddRemoveIDs`
   - ``PrivateJoinOnKey`` -> :class:`~tmlt.core.transformations.spark_transformations.join.PrivateJoinOnIDs`
   - ``FlatMapByKey`` -> :class:`~tmlt.core.transformations.spark_transformations.map.FlatMapByID`
+- :meth:`.PrivacyAccountant.measure` with an explicit ``d_out`` now evaluates the measurement's privacy relation once instead of twice: the check made by its :class:`~.SequentialQueryable` reuses the accountant's result when it is for the same ``d_in`` and ``d_out``. All checks and error messages are unchanged.
 
 Fixed
 ~~~~~

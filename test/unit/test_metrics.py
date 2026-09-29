@@ -2162,6 +2162,37 @@ class TestDictMetric(TestCase):
         ):
             metric.validate_subset((1, 2, 3), ["A"])  # type: ignore
 
+    def test_validate_subset_subclass_overriding_validate(self):
+        """validate_subset runs the full validate if a subclass overrides it."""
+
+        class _BoundedSumDictMetric(DictMetric):
+            """DictMetric whose distances must also sum to at most 10."""
+
+            def validate(self, value: Dict[Any, Any]) -> None:
+                super().validate(value)
+                if sum(value.values()) > 10:
+                    raise ValueError("Distances must sum to at most 10.")
+
+        class _FastBoundedSumDictMetric(_BoundedSumDictMetric):
+            """Also overrides validate_subset, so the fast path is used."""
+
+            def validate_subset(self, value: Dict[Any, Any], keys: Any) -> None:
+                super().validate_subset(value, keys)
+
+        key_to_metric = {"A": AbsoluteDifference(), "B": AbsoluteDifference()}
+        metric = _BoundedSumDictMetric(key_to_metric)
+        metric.validate_subset({"A": 1, "B": 2}, ["A"])
+        # Both the constraint across keys and the unchecked key's value are
+        # validated.
+        with self.assertRaisesRegex(ValueError, "sum to at most 10"):
+            metric.validate_subset({"A": 1, "B": 20}, ["A"])
+        with self.assertRaisesRegex(ValueError, "Invalid value for DictMetric"):
+            metric.validate_subset({"A": 1, "B": -1}, ["A"])
+        # A subclass that also overrides validate_subset controls its behavior.
+        _FastBoundedSumDictMetric(key_to_metric).validate_subset(
+            {"A": 1, "B": 20}, ["A"]
+        )
+
     @parameterized.expand(
         [
             (True, True, True),

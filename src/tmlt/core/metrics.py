@@ -1272,14 +1272,27 @@ class DictMetric(Metric):
 
         The distances at all other keys are **not** validated. Callers must therefore
         only use this if the result they compute depends on ``value`` only through
-        the distances at ``keys``; use :meth:`validate` otherwise. Subclasses that
-        override :meth:`validate` must also override this method.
+        the distances at ``keys``; use :meth:`validate` otherwise.
+
+        If a subclass overrides :meth:`validate` (for example, to add a constraint
+        that spans several keys) but not this method, this method falls back to the
+        full :meth:`validate`, so no check is skipped. Such subclasses may override
+        this method (and call this implementation) to opt back in to the cheaper
+        behavior.
 
         Args:
             value: A distance between two datasets under this metric.
             keys: The keys whose distances must be validated. Each must be a key of
                 :attr:`~.key_to_metric`.
         """
+        # Fail safe: a subclass's validate may add checks that the per-key checks
+        # below would skip, so run it in full unless the subclass has opted in.
+        if (
+            type(self).validate is not DictMetric.validate
+            and type(self).validate_subset is DictMetric.validate_subset
+        ):
+            self.validate(value)
+            return
         if not isinstance(value, dict):
             raise ValueError("DictMetric value must be a python dictionary.")
         if set(self._key_to_metric) != set(value):

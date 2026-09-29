@@ -24,7 +24,10 @@ from tmlt.core.domains.spark_domains import (
 )
 from tmlt.core.exceptions import DomainKeyError, UnsupportedDomainError
 from tmlt.core.measurements.chaining import ChainTM
-from tmlt.core.measurements.interactive_measurements import SequentialComposition
+from tmlt.core.measurements.interactive_measurements import (
+    PrivacyAccountant,
+    SequentialComposition,
+)
 from tmlt.core.measurements.noise_mechanisms import AddLaplaceNoise
 from tmlt.core.measures import PureDP
 from tmlt.core.metrics import (
@@ -751,6 +754,78 @@ class TestPartialDictValidationInContext(TestCase):
                 d_in=self.invalid_sibling,
                 privacy_budget=1,
             )
+
+    def test_privacy_accountant_transform_in_place(self):
+        """transform_in_place with GetValue sets d_in to the accessed distance."""
+        accountant = PrivacyAccountant.launch(
+            measurement=SequentialComposition(
+                input_domain=_NUMPY_DICT_DOMAIN,
+                input_metric=_NUMPY_DICT_METRIC,
+                output_measure=PureDP(),
+                d_in={"A": 1, "B": 2, "C": 3},
+                privacy_budget=1,
+            ),
+            data={"A": np.int64(10), "B": np.int64(20), "C": np.int64(30)},
+        )
+        accountant.transform_in_place(
+            GetValue(
+                input_domain=_NUMPY_DICT_DOMAIN,
+                input_metric=_NUMPY_DICT_METRIC,
+                key="B",
+            )
+        )
+        self.assertEqual(accountant.input_metric, AbsoluteDifference())
+        self.assertEqual(accountant.d_in, 2)
+
+    def test_nested_dict_metric_validates_accessed_value_in_full(self):
+        """A DictMetric distance returned by GetValue is validated in full."""
+        inner_metric = DictMetric(
+            {"a": AbsoluteDifference(), "b": AbsoluteDifference()}
+        )
+        transformation = GetValue(
+            input_domain=DictDomain(
+                {
+                    "X": DictDomain(
+                        {"a": NumpyIntegerDomain(), "b": NumpyIntegerDomain()}
+                    ),
+                    "Y": NumpyIntegerDomain(),
+                }
+            ),
+            input_metric=DictMetric({"X": inner_metric, "Y": AbsoluteDifference()}),
+            key="X",
+        )
+        self.assertEqual(
+            transformation.stability_function({"X": {"a": 1, "b": 2}, "Y": -1}),
+            {"a": 1, "b": 2},
+        )
+        for bad_inner in ({"a": 1, "b": -1}, {"a": 1}, {"a": 1, "b": 2, "c": 3}):
+            with self.assertRaisesRegex(ValueError, "Invalid (value for )?DictMetric"):
+                transformation.stability_function({"X": bad_inner, "Y": 1})
+
+    def test_dict_metric_subclass_overriding_validate(self):
+        """GetValue runs the full validate of a DictMetric subclass that adds checks.
+
+        See :meth:`~.DictMetric.validate_subset`.
+        """
+
+        class _BoundedSumDictMetric(DictMetric):
+            """DictMetric whose distances must also sum to at most 10."""
+
+            def validate(self, value: Dict[Any, Any]) -> None:
+                super().validate(value)
+                if sum(value.values()) > 10:
+                    raise ValueError("Distances must sum to at most 10.")
+
+        transformation = GetValue(
+            input_domain=_NUMPY_DICT_DOMAIN,
+            input_metric=_BoundedSumDictMetric(_NUMPY_DICT_METRIC.key_to_metric),
+            key="A",
+        )
+        self.assertEqual(transformation.stability_function({"A": 1, "B": 2, "C": 3}), 1)
+        with self.assertRaisesRegex(ValueError, "sum to at most 10"):
+            transformation.stability_function({"A": 1, "B": 20, "C": 3})
+        with self.assertRaisesRegex(ValueError, "Invalid value for DictMetric"):
+            transformation.stability_function(self.invalid_sibling)
 
 
 class TestCreateDictFromValue(TestCase):

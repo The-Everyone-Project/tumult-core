@@ -2212,14 +2212,36 @@ class TestDictMetric(TestCase):
                 DictMetric({"1": AbsoluteDifference()}),
                 False,
             ),
-            (  # keys that compare equal but have different types are different
+            (  # keys are matched by value, like dict lookups and DictDomain
                 DictMetric({1: AbsoluteDifference()}),
                 DictMetric({1.0: AbsoluteDifference()}),
-                False,
+                True,
             ),
             (
                 DictMetric({1: AbsoluteDifference()}),
                 DictMetric({True: AbsoluteDifference()}),
+                True,
+            ),
+            (  # numpy scalar keys match the equivalent builtin keys
+                DictMetric({np.str_("a"): AbsoluteDifference()}),
+                DictMetric({"a": AbsoluteDifference()}),
+                True,
+            ),
+            (
+                DictMetric({np.int64(1): AbsoluteDifference()}),
+                DictMetric({1: AbsoluteDifference()}),
+                True,
+            ),
+            (  # numpy keys, different insertion order
+                DictMetric(
+                    {np.str_("a"): AbsoluteDifference(), "b": SymmetricDifference()}
+                ),
+                DictMetric({"b": SymmetricDifference(), "a": AbsoluteDifference()}),
+                True,
+            ),
+            (
+                DictMetric({np.str_("a"): AbsoluteDifference()}),
+                DictMetric({"a": SymmetricDifference()}),
                 False,
             ),
             (  # mixed key types, different insertion order
@@ -2317,6 +2339,34 @@ class TestDictMetric(TestCase):
         self.assertEqual(value1 != value2, not expected)
         if expected:
             self.assertEqual(hash(value1), hash(value2))
+
+    @parameterized.expand(
+        [
+            ({"a": 1}, {"a": 2}),
+            ({"a": 1}, {"b": 1}),
+            ({np.str_("a"): 1}, {"a": 1}),
+            ({np.int64(1): 1}, {1: 1}),
+            ({1: 1}, {1.0: 1}),
+            ({1: 1}, {True: 1}),
+            ({1: 1}, {"1": 1}),
+            ({0.0: 1}, {-0.0: 1}),
+            ({"a": 1, "b": 2}, {"b": 2, "a": 1}),
+            ({"a": 1, "b": 2}, {"b": 1, "a": 2}),
+            ({("a", 1): 1}, {("a", np.int64(1)): 1}),
+        ]
+    )
+    def test_eq_matches_dict_domain(self, spec1: Dict[Any, int], spec2: Dict[Any, int]):
+        """DictMetric and DictDomain equality match keys in the same way."""
+        metrics = [AbsoluteDifference(), SymmetricDifference()]
+        domains = [NumpyIntegerDomain(), NumpyFloatDomain()]
+        metric1 = DictMetric({k: metrics[v - 1] for k, v in spec1.items()})
+        metric2 = DictMetric({k: metrics[v - 1] for k, v in spec2.items()})
+        domain1 = DictDomain({k: domains[v - 1] for k, v in spec1.items()})
+        domain2 = DictDomain({k: domains[v - 1] for k, v in spec2.items()})
+        self.assertEqual(metric1 == metric2, domain1 == domain2)
+        self.assertEqual(metric2 == metric1, domain1 == domain2)
+        if metric1 == metric2:
+            self.assertEqual(hash(metric1), hash(metric2))
 
     def test_eq_identity(self):
         """A metric is equal to itself, without comparing its entries."""

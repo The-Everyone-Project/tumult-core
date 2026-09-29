@@ -24,7 +24,7 @@ Changed
   - ``AddRemoveKeys`` -> :class:`~tmlt.core.metrics.AddRemoveIDs`
   - ``PrivateJoinOnKey`` -> :class:`~tmlt.core.transformations.spark_transformations.join.PrivateJoinOnIDs`
   - ``FlatMapByKey`` -> :class:`~tmlt.core.transformations.spark_transformations.map.FlatMapByID`
-- Equality checks on :class:`~tmlt.core.metrics.DictMetric`, :class:`~tmlt.core.domains.collections.DictDomain` and :class:`~tmlt.core.domains.spark_domains.SparkDataFrameDomain` are faster: identical objects are recognized immediately, and :class:`~tmlt.core.metrics.DictMetric` compares its keys and metrics directly instead of comparing string representations.
+- Equality checks on :class:`~tmlt.core.metrics.DictMetric`, :class:`~tmlt.core.domains.collections.DictDomain` and :class:`~tmlt.core.domains.spark_domains.SparkDataFrameDomain` are faster: identical objects are recognized immediately, and :class:`~tmlt.core.metrics.DictMetric` compares its keys and metrics directly instead of comparing string representations. Its keys are matched by value, the same way as :class:`~tmlt.core.domains.collections.DictDomain` keys, so for example ``1`` and ``True`` are now the same key.
 
 Fixed
 ~~~~~

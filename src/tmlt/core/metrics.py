@@ -1329,8 +1329,9 @@ class DictMetric(Metric):
     def __eq__(self, other: Any) -> bool:
         """Return True if both metrics have the same keys and equal metrics.
 
-        Keys are matched by type as well as value (so ``1``, ``1.0`` and
-        ``True`` are different keys), and key order is ignored.
+        Keys are matched by value, the same way dictionary lookups and
+        :class:`~tmlt.core.domains.collections.DictDomain` equality match them (so
+        ``"a"`` and ``np.str_("a")`` are the same key), and key order is ignored.
         """
         if self is other:
             return True
@@ -1343,18 +1344,14 @@ class DictMetric(Metric):
         # Fast path: both dicts have the same keys in the same order, which is the
         # common case when one metric was derived from the same mapping as the other.
         for (key1, metric1), (key2, metric2) in zip(mine.items(), theirs.items()):
-            if key1 is not key2 and (
-                key1.__class__ is not key2.__class__ or key1 != key2
-            ):
+            if key1 is not key2 and key1 != key2:
                 break
             if metric1 is not metric2 and metric1 != metric2:
                 return False
         else:
             return True
         # Slow path: keys are in a different order (or differ).
-        if {(key.__class__, key) for key in mine} != {
-            (key.__class__, key) for key in theirs
-        }:
+        if mine.keys() != theirs.keys():
             return False
         return all(
             metric is theirs[key] or metric == theirs[key]
@@ -1366,7 +1363,7 @@ class DictMetric(Metric):
         return hash(
             (
                 self.__class__.__name__,
-                frozenset((key.__class__, key) for key in self._key_to_metric),
+                frozenset(self._key_to_metric),
             )
         )
 

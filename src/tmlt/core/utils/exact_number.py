@@ -151,15 +151,26 @@ def _verify_expr_is_an_exact_number(expr: sp.Expr) -> None:
     _verify_expr_recursively(expr)
 
 
+@typechecked
+def _check_is_sympy_expr(expr: sp.Expr) -> None:
+    """Raises a type check error if ``expr`` is not a :class:`sympy.Expr`.
+
+    This has the same signature as :func:`_verify_expr_is_an_exact_number`, so the
+    error is the same as the one that function raises.
+    """
+
+
 def _verify_expr_recursively(expr: sp.Expr) -> None:
     """Implementation of :func:`_verify_expr_is_an_exact_number`.
 
     This is not type checked, since it is called recursively on every subexpression.
     Non-:class:`sympy.Expr` values are passed to the type checked
-    :func:`_verify_expr_is_an_exact_number` so that they fail in the same way.
+    :func:`_check_is_sympy_expr` so that they fail in the same way as they would in
+    :func:`_verify_expr_is_an_exact_number`. If type checking is disabled (e.g. with
+    ``python -O``), they are rejected by the checks below instead.
     """
     if not isinstance(expr, sp.Expr):
-        _verify_expr_is_an_exact_number(expr)
+        _check_is_sympy_expr(expr)
     if expr.free_symbols:
         raise UnsupportedSympyExprError(expr, f"{expr} contains free symbols")
     # is_number means no free symbols, and no undefined functions

@@ -1,8 +1,12 @@
 """Unit tests for :mod:`tmlt.core.utils.exact_number`."""
 
 import itertools
+import subprocess
+import sys
+import textwrap
 from contextlib import contextmanager
 from fractions import Fraction
+from functools import partial
 from typing import Any, Callable, Iterator, Tuple
 from unittest import TestCase
 from unittest.mock import patch
@@ -12,8 +16,15 @@ import pytest
 import sympy as sp
 from parameterized import parameterized
 
+from tmlt.core.exceptions import UnsupportedSympyExprError
 from tmlt.core.utils import exact_number
-from tmlt.core.utils.exact_number import ExactNumber, ExactNumberInput, _cached_to_sympy
+from tmlt.core.utils.exact_number import (
+    ExactNumber,
+    ExactNumberInput,
+    _cached_to_sympy,
+    _verify_expr_is_an_exact_number,
+    _verify_expr_recursively,
+)
 
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Tumult Labs 2022-2025, and the Tumult Core Contributors 2025-present
@@ -321,8 +332,8 @@ def test_cache_distinguishes_input_types():
 def test_invalid_inputs_are_rejected_every_time():
     """Errors are not cached, so invalid inputs keep raising the same error."""
     for value in ("x + 1", 3.5, "pi + I"):
-        first = _outcome(lambda v=value: ExactNumber(v))
-        second = _outcome(lambda v=value: ExactNumber(v))
+        first = _outcome(partial(ExactNumber, value))
+        second = _outcome(partial(ExactNumber, value))
         assert first[0] == "error"
         assert first == second
 
@@ -349,3 +360,68 @@ def test_simplified_sympy_numbers_are_unchanged(value: sp.Expr):
     assert ExactNumber(value).expr is value
     assert sp.simplify(value) == value
     assert type(sp.simplify(value)) is type(value)
+
+
+_NON_EXPR_INPUTS = [
+    sp.Eq(1, 2),
+    sp.Eq(sp.symbols("x"), 2, evaluate=False),
+    sp.StrictGreaterThan(1, 0, evaluate=False),
+    sp.Tuple(1, 2),
+]
+
+
+@pytest.mark.parametrize("value", _NON_EXPR_INPUTS, ids=repr)
+def test_non_expr_fails_like_type_checked_verifier(value: Any):
+    """The unchecked verifier raises the same error for non-Expr values."""
+    expected = _outcome(lambda: _verify_expr_is_an_exact_number(value))
+    assert expected[0] == "error"
+    assert _outcome(lambda: _verify_expr_recursively(value)) == expected
+
+
+@pytest.mark.parametrize("value", _NON_EXPR_INPUTS, ids=repr)
+def test_non_expr_rejected_without_type_checking(value: Any):
+    """Non-Expr values are rejected, not recursed on, if type checking is disabled.
+
+    Type checking is disabled with ``python -O``; this simulates it by replacing the
+    type checked functions with unchecked versions and calling the unchecked
+    verifier directly.
+    """
+
+    def unchecked(expr: Any) -> None:
+        """Unchecked version of the type checked no-op."""
+
+    with (
+        patch.object(exact_number, "_check_is_sympy_expr", unchecked),
+        patch.object(
+            exact_number, "_verify_expr_is_an_exact_number", _verify_expr_recursively
+        ),
+    ):
+        with pytest.raises(UnsupportedSympyExprError):
+            _verify_expr_recursively(value)
+
+
+def test_non_expr_rejected_with_python_optimize():
+    """Non-Expr values raise UnsupportedSympyExprError under ``python -O``.
+
+    ``python -O`` disables type checking, which previously led to a RecursionError.
+    """
+    code = textwrap.dedent(
+        """
+        import sympy as sp
+        from tmlt.core.exceptions import UnsupportedSympyExprError
+        from tmlt.core.utils.exact_number import (
+            ExactNumber,
+            _verify_expr_is_an_exact_number,
+        )
+        for func in (
+            lambda: ExactNumber("1 > 0"),
+            lambda: _verify_expr_is_an_exact_number(sp.Eq(1, 2)),
+        ):
+            try:
+                func()
+            except UnsupportedSympyExprError:
+                continue
+            raise AssertionError("expected UnsupportedSympyExprError")
+        """
+    )
+    subprocess.run([sys.executable, "-O", "-c", code], check=True, timeout=120)

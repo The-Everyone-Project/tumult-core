@@ -157,6 +157,10 @@ def validate_exact_number(
         maximum_is_inclusive: If False, ``value`` being equal to ``maximum`` is not
             allowed. Defaults to True.
     """
+    if _plain_int_is_valid(
+        value, minimum, minimum_is_inclusive, maximum, maximum_is_inclusive
+    ):
+        return
     exact_value = ExactNumber(value)
     if not (allow_nonintegral or exact_value.is_integer or not exact_value.is_finite):
         raise ValueError(f"{value} is not an integer")
@@ -174,3 +178,33 @@ def validate_exact_number(
                 raise ValueError(f"{value} is not less than or equal to {maximum}")
         elif exact_value >= exact_maximum:
             raise ValueError(f"{value} is not strictly less than {maximum}")
+
+
+def _plain_int_is_valid(
+    value: ExactNumberInput,
+    minimum: Optional[ExactNumberInput],
+    minimum_is_inclusive: bool,
+    maximum: Optional[ExactNumberInput],
+    maximum_is_inclusive: bool,
+) -> bool:
+    """Returns True if ``value`` is a plain int that passes the bounds checks.
+
+    This is a fast path for :func:`validate_exact_number` that avoids building any
+    :class:`~.ExactNumber` s. It only applies when ``value`` and the bounds are plain
+    :class:`int` s (not :class:`bool`) or ``None``; integers always satisfy
+    ``allow_nonintegral=False``. A False return value does not mean ``value`` is
+    invalid, only that the full check (which produces the error message) must run.
+    """
+    if type(value) is not int:
+        return False
+    if minimum is not None:
+        if type(minimum) is not int:
+            return False
+        if value < minimum or (value == minimum and not minimum_is_inclusive):
+            return False
+    if maximum is not None:
+        if type(maximum) is not int:
+            return False
+        if value > maximum or (value == maximum and not maximum_is_inclusive):
+            return False
+    return True

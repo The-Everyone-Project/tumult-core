@@ -1,13 +1,19 @@
 """Unit tests for :mod:`tmlt.core.utils.exact_number`."""
 
 import itertools
+from contextlib import contextmanager
 from fractions import Fraction
+from typing import Any, Callable, Iterator, Tuple
 from unittest import TestCase
+from unittest.mock import patch
 
+import numpy as np
+import pytest
 import sympy as sp
 from parameterized import parameterized
 
-from tmlt.core.utils.exact_number import ExactNumber, ExactNumberInput
+from tmlt.core.utils import exact_number
+from tmlt.core.utils.exact_number import ExactNumber, ExactNumberInput, _cached_to_sympy
 
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Tumult Labs 2022-2025, and the Tumult Core Contributors 2025-present
@@ -195,3 +201,151 @@ class TestExactNumber(TestCase):
             expected = bool(compare(ExactNumber(value1).expr, ExactNumber(value2)))
             self.assertEqual(compare(ExactNumber(value1), value2), expected)
             self.assertEqual(compare(value1, ExactNumber(value2)), expected)
+
+
+# Inputs covering every branch of ExactNumber conversion, valid and invalid.
+_CONVERSION_INPUTS = [
+    0,
+    1,
+    5,
+    -1,
+    10**30,
+    -(10**30),
+    True,
+    False,
+    "0",
+    "1",
+    "-3",
+    "0.5",
+    "1/3",
+    "2 + 7**2",
+    "sqrt(5/3)",
+    "oo",
+    "x + 1",
+    "pi + I",
+    "1 > 0",
+    "not a number!",
+    Fraction(1, 2),
+    Fraction(-3, 4),
+    Fraction(4, 2),
+    sp.Integer(0),
+    sp.Integer(-3),
+    sp.Rational(1, 3),
+    sp.S.Half,
+    sp.oo,
+    -sp.oo,
+    sp.pi,
+    sp.sqrt(2),
+    sp.Integer(2) + sp.sqrt(3),
+    sp.Float(3.14),
+    sp.I,
+    sp.nan,
+    sp.zoo,
+    sp.symbols("x"),
+    float("inf"),
+    -float("inf"),
+    0.0,
+    1.0,
+    -1.0,
+    3.5,
+    float("nan"),
+    np.float64(2.0),
+    np.int64(3),
+    None,
+    [1],
+    ExactNumber(3),
+    ExactNumber("1/3"),
+    ExactNumber(sp.oo),
+]
+
+
+def _outcome(func: Callable[[], Any]) -> Tuple[Any, ...]:
+    """Returns ("ok", result) or ("error", exception type, message) for func()."""
+    try:
+        return ("ok", func())
+    except Exception as e:
+        return ("error", type(e), str(e))
+
+
+@contextmanager
+def _exact_number_slow_path() -> Iterator[None]:
+    """Disables the ExactNumber fast paths, so every input takes the full path."""
+    with (
+        patch.object(exact_number, "_CACHEABLE_INPUT_TYPES", frozenset()),
+        patch.object(exact_number, "_SIMPLIFIED_EXACT_SYMPY_TYPES", ()),
+    ):
+        yield
+
+
+def _expr_outcome(value: Any) -> Tuple[Any, ...]:
+    """Returns the outcome of converting ``value``, including the type of the expr."""
+    result = _outcome(lambda: ExactNumber(value).expr)
+    if result[0] == "ok":
+        return ("ok", result[1], type(result[1]))
+    return result
+
+
+@pytest.mark.parametrize("value", _CONVERSION_INPUTS, ids=repr)
+def test_fast_path_matches_slow_path(value: Any):
+    """ExactNumber conversion gives the same result or error with the fast paths."""
+    with _exact_number_slow_path():
+        expected = _expr_outcome(value)
+    _cached_to_sympy.cache_clear()
+    cold = _expr_outcome(value)
+    warm = _expr_outcome(value)
+    assert cold == expected
+    assert warm == expected
+    if expected[0] == "ok":
+        # The fast path must still produce a simplified expression.
+        assert sp.simplify(expected[1]) == expected[1]
+
+
+def test_cache_distinguishes_input_types():
+    """Equal values of different types are cached separately."""
+    _cached_to_sympy.cache_clear()
+    for value in (1, "1", Fraction(1), True, sp.Integer(1)):
+        assert ExactNumber(value) == 1
+    assert _outcome(lambda: ExactNumber(1.0))[1] is ValueError
+    _cached_to_sympy.cache_clear()
+    ExactNumber(Fraction(1))
+    # Only int, str and Fraction are cached; bool and float are not.
+    ExactNumber(True)
+    ExactNumber(float("inf"))
+    ExactNumber(1)
+    ExactNumber("1")
+    info = _cached_to_sympy.cache_info()
+    assert info.currsize == 3
+    assert info.hits == 0
+
+
+def test_invalid_inputs_are_rejected_every_time():
+    """Errors are not cached, so invalid inputs keep raising the same error."""
+    for value in ("x + 1", 3.5, "pi + I"):
+        first = _outcome(lambda v=value: ExactNumber(v))
+        second = _outcome(lambda v=value: ExactNumber(v))
+        assert first[0] == "error"
+        assert first == second
+
+
+def test_exact_number_input_is_reused():
+    """Constructing from an ExactNumber reuses its already-verified expression."""
+    value = ExactNumber("sqrt(5/3)")
+    assert ExactNumber(value).expr is value.expr
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        sp.Integer(7),
+        sp.Rational(-2, 9),
+        sp.S.Zero,
+        sp.oo,
+        -sp.oo,
+    ],
+    ids=repr,
+)
+def test_simplified_sympy_numbers_are_unchanged(value: sp.Expr):
+    """Rationals and infinities are used as is, and simplify would not change them."""
+    assert ExactNumber(value).expr is value
+    assert sp.simplify(value) == value
+    assert type(sp.simplify(value)) is type(value)

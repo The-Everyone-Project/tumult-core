@@ -43,6 +43,27 @@ from tmlt.core.utils.misc import ConciseFrozenSet
 from tmlt.core.utils.validation import validate_exact_number
 
 
+def _is_nonnegative_int(value: Any) -> bool:
+    """Returns True if ``value`` is a plain nonnegative :class:`int`.
+
+    This is used as a fast path in metrics whose valid distances include every
+    nonnegative integer. :class:`bool` and other :class:`int` subclasses are excluded,
+    and are validated through the general path instead.
+    """
+    return type(value) is int and value >= 0
+
+
+def _compare_exact_numbers(value1: ExactNumberInput, value2: ExactNumberInput) -> bool:
+    """Returns ``ExactNumber(value1) <= ExactNumber(value2)``.
+
+    Plain :class:`int` s are compared directly, which gives the same result without
+    building :class:`~.ExactNumber` s.
+    """
+    if type(value1) is int and type(value2) is int:
+        return value1 <= value2
+    return ExactNumber(value1) <= ExactNumber(value2)
+
+
 class Metric(Formattable, ABC):
     """Base class for input/output metrics."""
 
@@ -180,6 +201,8 @@ class AbsoluteDifference(ExactNumberMetric):
         Args:
             value: A distance between two datasets under this metric.
         """
+        if _is_nonnegative_int(value):
+            return
         try:
             validate_exact_number(
                 value=value,
@@ -194,7 +217,7 @@ class AbsoluteDifference(ExactNumberMetric):
         """Returns True if ``value1`` is less than or equal to ``value2``."""
         self.validate(value1)
         self.validate(value2)
-        return ExactNumber(value1) <= ExactNumber(value2)
+        return _compare_exact_numbers(value1, value2)
 
     def supports_domain(self, domain: Domain) -> bool:
         """Return True if the metric is implemented for the passed domain.
@@ -289,6 +312,8 @@ class SymmetricDifference(ExactNumberMetric):
         Args:
             value: A distance between two datasets under this metric.
         """
+        if _is_nonnegative_int(value):
+            return
         try:
             validate_exact_number(
                 value=value,
@@ -305,7 +330,7 @@ class SymmetricDifference(ExactNumberMetric):
         """Returns True if ``value1`` is less than or equal to ``value2``."""
         self.validate(value1)
         self.validate(value2)
-        return ExactNumber(value1) <= ExactNumber(value2)
+        return _compare_exact_numbers(value1, value2)
 
     def supports_domain(self, domain: Domain) -> bool:
         """Return True if the metric is implemented for the passed domain.
@@ -417,6 +442,8 @@ class HammingDistance(ExactNumberMetric):
         Args:
             value: A distance between two datasets under this metric.
         """
+        if _is_nonnegative_int(value):
+            return
         try:
             validate_exact_number(
                 value=value,
@@ -431,7 +458,7 @@ class HammingDistance(ExactNumberMetric):
         """Returns True if ``value1`` is less than or equal to ``value2``."""
         self.validate(value1)
         self.validate(value2)
-        return ExactNumber(value1) <= ExactNumber(value2)
+        return _compare_exact_numbers(value1, value2)
 
     def supports_domain(self, domain: Domain) -> bool:
         """Return True if the metric is implemented for the passed domain.
@@ -522,7 +549,7 @@ class AggregationMetric(ExactNumberMetric):
         """
         self.validate(value1)
         self.validate(value2)
-        return ExactNumber(value1) <= ExactNumber(value2)
+        return _compare_exact_numbers(value1, value2)
 
     def supports_domain(self, domain: Domain) -> bool:
         """Return True if the metric is implemented for the passed domain.
@@ -750,6 +777,8 @@ class RootSumOfSquared(AggregationMetric):
         Args:
             value: A distance between two datasets under this metric.
         """
+        if _is_nonnegative_int(value):
+            return
         try:
             validate_exact_number(
                 value=value,
@@ -1442,7 +1471,6 @@ class AddRemoveIDs(Metric):
         """Returns the key column."""
         return self._df_to_id_column.copy()
 
-    @typechecked
     def validate(self, value: ExactNumberInput) -> None:
         """Raises an error if ``value`` not a valid distance.
 
@@ -1451,6 +1479,8 @@ class AddRemoveIDs(Metric):
         Args:
             value: A distance between two datasets under this metric.
         """
+        if _is_nonnegative_int(value):
+            return
         try:
             validate_exact_number(
                 value=value,
@@ -1465,7 +1495,7 @@ class AddRemoveIDs(Metric):
         """Returns True if ``value1`` is less than or equal to ``value2``."""
         self.validate(value1)
         self.validate(value2)
-        return ExactNumber(value1) <= ExactNumber(value2)
+        return _compare_exact_numbers(value1, value2)
 
     def supports_domain(self, domain: Domain) -> bool:
         """Return True if the metric is implemented for the passed domain.

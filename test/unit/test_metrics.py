@@ -4,7 +4,9 @@
 # Copyright Tumult Labs 2022-2025, and the Tumult Core Contributors 2025-present
 
 import datetime
+import itertools
 import textwrap
+from fractions import Fraction
 from typing import Any, Dict, Union
 from unittest import TestCase
 from unittest.mock import patch
@@ -2733,3 +2735,194 @@ class TestAddRemoveIDs(PySparkTest):
             for key, (data, schema) in value2.items()
         }
         self.assertEqual(metric.distance(value1, value2, domain), distance)
+
+
+_FAST_PATH_METRICS = [
+    AbsoluteDifference(),
+    SymmetricDifference(),
+    HammingDistance(),
+    SumOf(SymmetricDifference()),
+    SumOf(HammingDistance()),
+    RootSumOfSquared(SymmetricDifference()),
+    RootSumOfSquared(AbsoluteDifference()),
+    IfGroupedBy(["A"], SymmetricDifference()),
+    IfGroupedBy(["A"], SumOf(SymmetricDifference())),
+    IfGroupedBy(["A"], RootSumOfSquared(SymmetricDifference())),
+    OnColumn("A", SumOf(AbsoluteDifference())),
+    AddRemoveIDs({"t": "A"}),
+]
+
+_FAST_PATH_DISTANCES = [
+    0,
+    1,
+    2,
+    7,
+    10**30,
+    -1,
+    -(10**30),
+    True,
+    False,
+    0.0,
+    1.0,
+    -1.0,
+    2.5,
+    float("inf"),
+    -float("inf"),
+    float("nan"),
+    np.int64(3),
+    sp.Integer(0),
+    sp.Integer(3),
+    sp.Integer(-3),
+    sp.Rational(1, 2),
+    sp.oo,
+    -sp.oo,
+    sp.sqrt(2),
+    ExactNumber(3),
+    ExactNumber(-3),
+    ExactNumber("1/2"),
+    Fraction(3, 1),
+    Fraction(1, 2),
+    Fraction(-1, 2),
+    "3",
+    "-3",
+    "0.5",
+    "x",
+    None,
+]
+
+
+def _metric_outcome(func: Any) -> Any:
+    """Returns ("ok", result) or ("error", exception type, message) for func()."""
+    try:
+        return ("ok", func())
+    except Exception as e:
+        return ("error", type(e), str(e))
+
+
+def _metrics_slow_path() -> Any:
+    """Disables the plain-int fast paths in metrics and validation."""
+    return patch.multiple(
+        "tmlt.core.metrics",
+        _is_nonnegative_int=lambda value: False,
+        _compare_exact_numbers=lambda v1, v2: ExactNumber(v1) <= ExactNumber(v2),
+    )
+
+
+@pytest.mark.parametrize("metric", _FAST_PATH_METRICS, ids=repr)
+def test_validate_fast_path_matches_slow_path(metric: Metric):
+    """Metric.validate accepts and rejects the same values, with the same errors."""
+    for value in _FAST_PATH_DISTANCES:
+        with (
+            _metrics_slow_path(),
+            patch("tmlt.core.utils.validation._plain_int_is_valid", return_value=False),
+        ):
+            expected = _metric_outcome(lambda v=value: metric.validate(v))
+        actual = _metric_outcome(lambda v=value: metric.validate(v))
+        assert actual == expected, value
+
+
+@pytest.mark.parametrize("metric", _FAST_PATH_METRICS, ids=repr)
+def test_compare_fast_path_matches_slow_path(metric: Metric):
+    """Metric.compare gives the same results and errors on the fast path."""
+    for value1, value2 in itertools.product(_FAST_PATH_DISTANCES, repeat=2):
+        with (
+            _metrics_slow_path(),
+            patch("tmlt.core.utils.validation._plain_int_is_valid", return_value=False),
+        ):
+            expected = _metric_outcome(
+                lambda v1=value1, v2=value2: metric.compare(v1, v2)
+            )
+        actual = _metric_outcome(lambda v1=value1, v2=value2: metric.compare(v1, v2))
+        assert actual == expected, (value1, value2)
+
+
+def test_dict_metric_fast_path_matches_slow_path():
+    """DictMetric validate/compare agree with the slow path for int distances."""
+    metric = DictMetric(
+        {
+            "a": SymmetricDifference(),
+            "b": AddRemoveIDs({"t": "A"}),
+            "c": IfGroupedBy(["A"], SumOf(SymmetricDifference())),
+        }
+    )
+    values = [0, 1, 5, -1, True, sp.Integer(2), 2.0, float("inf"), "x"]
+    dicts = [{"a": v, "b": 3, "c": 1} for v in values]
+    dicts += [{"a": 1, "b": 1, "c": v} for v in values]
+    dicts += [{"a": 1, "b": 1}, {"a": 1, "b": 1, "c": 1, "d": 1}]
+    for d1, d2 in itertools.product(dicts, repeat=2):
+        with (
+            _metrics_slow_path(),
+            patch("tmlt.core.utils.validation._plain_int_is_valid", return_value=False),
+        ):
+            expected = (
+                _metric_outcome(lambda d=d1: metric.validate(d)),
+                _metric_outcome(lambda a=d1, b=d2: metric.compare(a, b)),
+            )
+        actual = (
+            _metric_outcome(lambda d=d1: metric.validate(d)),
+            _metric_outcome(lambda a=d1, b=d2: metric.compare(a, b)),
+        )
+        assert actual == expected, (d1, d2)
+
+
+@pytest.mark.parametrize(
+    "metric,value,message",
+    [
+        (
+            SymmetricDifference(),
+            -1,
+            "Invalid value for metric SymmetricDifference: "
+            "-1 is not greater than or equal to 0",
+        ),
+        (
+            HammingDistance(),
+            -3,
+            "Invalid value for metric HammingDistance: "
+            "-3 is not greater than or equal to 0",
+        ),
+        (
+            HammingDistance(),
+            Fraction(1, 2),
+            "Invalid value for metric HammingDistance: 1/2 is not an integer",
+        ),
+        (
+            AbsoluteDifference(),
+            -1,
+            "Invalid value for metric AbsoluteDifference: "
+            "-1 is not greater than or equal to 0",
+        ),
+        (
+            AddRemoveIDs({"t": "A"}),
+            -1,
+            "Invalid value for metric AbsoluteDifference: "
+            "-1 is not greater than or equal to 0",
+        ),
+        (
+            DictMetric({"a": SymmetricDifference()}),
+            {"a": -2},
+            "Invalid value for DictMetric: Invalid value for metric "
+            "SymmetricDifference: -2 is not greater than or equal to 0",
+        ),
+        (
+            SymmetricDifference(),
+            1.5,
+            "Invalid value for metric SymmetricDifference: Expected +/-float('inf'),"
+            " not 1.5",
+        ),
+    ],
+)
+def test_int_distance_error_messages(metric: Metric, value: Any, message: str):
+    """Invalid distances are still rejected with the same error messages."""
+    with pytest.raises(ValueError) as exc_info:
+        metric.validate(value)
+    assert str(exc_info.value).startswith(message)
+
+
+@pytest.mark.parametrize("value", [None, [1], np.int64(3), {"a": 1}], ids=repr)
+def test_add_remove_ids_validate_type_errors(value: Any):
+    """AddRemoveIDs.validate still raises typeguard's error for unsupported types."""
+    with pytest.raises(
+        TypeCheckError,
+        match=r'^argument "value" \(.*\) did not match any element in the union',
+    ):
+        AddRemoveIDs({"t": "A"}).validate(value)

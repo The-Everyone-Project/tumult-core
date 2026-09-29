@@ -136,6 +136,7 @@ Examples:
 # Copyright Tumult Labs 2022-2025, and the Tumult Core Contributors 2025-present
 
 from fractions import Fraction
+from functools import lru_cache
 from typing import Any, Union
 
 import sympy as sp
@@ -147,6 +148,18 @@ from tmlt.core.exceptions import UnsupportedSympyExprError
 @typechecked
 def _verify_expr_is_an_exact_number(expr: sp.Expr) -> None:
     """Raises an error if ``expr`` is not an exact real number or +/- infinity."""
+    _verify_expr_recursively(expr)
+
+
+def _verify_expr_recursively(expr: sp.Expr) -> None:
+    """Implementation of :func:`_verify_expr_is_an_exact_number`.
+
+    This is not type checked, since it is called recursively on every subexpression.
+    Non-:class:`sympy.Expr` values are passed to the type checked
+    :func:`_verify_expr_is_an_exact_number` so that they fail in the same way.
+    """
+    if not isinstance(expr, sp.Expr):
+        _verify_expr_is_an_exact_number(expr)
     if expr.free_symbols:
         raise UnsupportedSympyExprError(expr, f"{expr} contains free symbols")
     # is_number means no free symbols, and no undefined functions
@@ -163,8 +176,8 @@ def _verify_expr_is_an_exact_number(expr: sp.Expr) -> None:
     if isinstance(expr, (sp.Mul, sp.Add)):
         left_expr, right_expr = expr.as_two_terms()
         try:
-            _verify_expr_is_an_exact_number(left_expr)
-            _verify_expr_is_an_exact_number(right_expr)
+            _verify_expr_recursively(left_expr)
+            _verify_expr_recursively(right_expr)
         except UnsupportedSympyExprError as e:
             raise UnsupportedSympyExprError(
                 expr, f"{expr} is not supported: {e}"
@@ -172,13 +185,13 @@ def _verify_expr_is_an_exact_number(expr: sp.Expr) -> None:
         return
     if isinstance(expr, (sp.Pow, sp.exp)):
         try:
-            _verify_expr_is_an_exact_number(expr.base)
+            _verify_expr_recursively(expr.base)
         except UnsupportedSympyExprError as e:
             raise UnsupportedSympyExprError(
                 expr, f"Base of {expr} is not supported: {e}"
             ) from e
         try:
-            _verify_expr_is_an_exact_number(expr.exp)
+            _verify_expr_recursively(expr.exp)
         except UnsupportedSympyExprError as e:
             raise UnsupportedSympyExprError(
                 expr, f"Exponent of {expr} is not supported: {e}"
@@ -190,7 +203,7 @@ def _verify_expr_is_an_exact_number(expr: sp.Expr) -> None:
                 expr, f"Logarithm {expr} has more than one term"
             )
         try:
-            _verify_expr_is_an_exact_number(expr.args[0])
+            _verify_expr_recursively(expr.args[0])
         except UnsupportedSympyExprError as e:
             raise UnsupportedSympyExprError(
                 expr, f"unsupported Logarithm {expr}: {e}"
@@ -243,9 +256,41 @@ def _to_sympy(value: "ExactNumberInput") -> sp.Expr:
         assert isinstance(value, sp.Expr)
         expr = value
 
+    if isinstance(expr, _SIMPLIFIED_EXACT_SYMPY_TYPES):
+        # Already verified and fully simplified; skip the expensive steps below.
+        return expr
     _verify_expr_is_an_exact_number(expr)
     expr = sp.simplify(expr)
     return expr
+
+
+_SIMPLIFIED_EXACT_SYMPY_TYPES = (
+    sp.Rational,
+    type(sp.oo),
+    type(-sp.oo),
+)
+"""SymPy types that are always valid exact numbers and are unchanged by simplify.
+
+:class:`sympy.Integer` is a subclass of :class:`sympy.Rational`.
+"""
+
+_CACHEABLE_INPUT_TYPES = frozenset({int, str, Fraction})
+"""Immutable, hashable input types whose conversions are memoized.
+
+Only exact types are cached (checked with ``type(value) in ...``), so subclasses such
+as :class:`bool` are converted without the cache.
+"""
+
+
+@lru_cache(maxsize=4096, typed=True)
+def _cached_to_sympy(value: Union[int, str, Fraction]) -> sp.Expr:
+    """Memoized :func:`_to_sympy` for values of the types in _CACHEABLE_INPUT_TYPES.
+
+    ``typed=True`` keeps equal values of different types (e.g. ``1`` and
+    ``Fraction(1)``) in separate cache entries. Errors are not cached, so invalid
+    inputs raise the same exception every time.
+    """
+    return _to_sympy(value)
 
 
 class ExactNumber:
@@ -261,7 +306,15 @@ class ExactNumber:
             value: An :data:`~.ExactNumberInput` that represents a real number or +/-
                 infinity.
         """
-        self._expr = _to_sympy(value)
+        if isinstance(value, ExactNumber):
+            # Already verified and simplified.
+            self._expr = value.expr
+        elif type(value) in _CACHEABLE_INPUT_TYPES:
+            self._expr = _cached_to_sympy(value)
+        elif isinstance(value, _SIMPLIFIED_EXACT_SYMPY_TYPES):
+            self._expr = value
+        else:
+            self._expr = _to_sympy(value)
 
     @property
     def expr(self) -> sp.Expr:

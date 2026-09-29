@@ -24,6 +24,7 @@ Changed
   - ``AddRemoveKeys`` -> :class:`~tmlt.core.metrics.AddRemoveIDs`
   - ``PrivateJoinOnKey`` -> :class:`~tmlt.core.transformations.spark_transformations.join.PrivateJoinOnIDs`
   - ``FlatMapByKey`` -> :class:`~tmlt.core.transformations.spark_transformations.map.FlatMapByID`
+- Improved performance of :class:`~tmlt.core.utils.exact_number.ExactNumber` construction, :func:`~tmlt.core.utils.validation.validate_exact_number`, and validating and comparing integer distances in metrics such as :class:`~tmlt.core.metrics.SymmetricDifference`.
 
 Fixed
 ~~~~~
